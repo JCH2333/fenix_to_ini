@@ -62,6 +62,53 @@ def set_log_callback(cb: Callable[[str], None]):
 ProgressCallback = Callable[[int, int, str], None]  # (current_phase, total_phases, phase_name)
 
 
+def _write_cycle_json(target_dir: str, cycle_info: dict):
+    """
+    Write cycle.json alongside the output s3db.
+
+    Format matches Navigraph DFDv2 cycle.json:
+    {
+        "cycle": "2607n2",
+        "revision": "2",
+        "name": "iniBuilds DFD v2",
+        "format": "dfdv2",
+        "validityPeriod": "2026-07-09/2026-08-05"
+    }
+    """
+    import json
+
+    cycle = cycle_info.get('cycle', '2607')
+    start_d = cycle_info.get('start_d', '09')
+    start_m = cycle_info.get('start_m', '07')
+    end_d = cycle_info.get('end_d', '05')
+    end_m = cycle_info.get('end_m', '08')
+    # Year: Fenix uses 2-digit, Navigraph uses 4-digit
+    yy = cycle_info.get('start_y', '26')
+    year = f"20{yy}" if len(yy) == 2 else yy
+
+    # Calculate revision: 'n2' suffix means revision 2
+    rev = '1'
+    if 'n' in cycle.lower():
+        idx = cycle.lower().index('n')
+        rev = cycle[idx + 1:].rstrip('n') or '1'
+
+    cycle_json = {
+        "cycle": cycle,
+        "revision": rev,
+        "name": "iniBuilds DFD v2",
+        "format": "dfdv2",
+        "validityPeriod": f"{year}-{start_m}-{start_d}/{year}-{end_m}-{end_d}"
+    }
+
+    json_path = os.path.join(os.path.dirname(target_dir), 'cycle.json')
+    try:
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(cycle_json, f, indent=2, ensure_ascii=False)
+        log(f"Updated cycle.json: {json_path}")
+    except Exception as e:
+        log(f"WARNING: Could not write cycle.json: {e}")
+
+
 def run_conversion(
     src_path: str,
     dst_path: str,
@@ -100,7 +147,7 @@ def run_conversion(
 
     log("=" * 60)
     log("  Fenix -> iniBuilds Navigation Data Converter")
-    log("  AIRAC Cycle 2607 - China Region Supplement")
+    log("  China Region Supplement (NAIP)")
     log("=" * 60)
     log(f"  Source:      {src_path}")
     log(f"  Destination: {dst_path}")
@@ -157,7 +204,7 @@ def run_conversion(
 
         # === Phase 0 ===
         advance("Phase 0: Header & Metadata")
-        convert_header(src_conn, dst_conn)
+        cycle_info = convert_header(src_conn, dst_conn)
 
         # === Phase 1 ===
         advance("Phase 1: Airports")
@@ -232,6 +279,9 @@ def run_conversion(
             log()
             log("Optimizing database (VACUUM)...")
             vacuum(dst_conn)
+
+            # Write cycle.json to target directory
+            _write_cycle_json(dst_path, cycle_info)
 
         log()
         check_integrity(dst_conn)

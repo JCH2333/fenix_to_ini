@@ -6,33 +6,65 @@ import sqlite3
 from datetime import datetime, timezone
 
 
+# Fenix date format: DDMMMYY (e.g. '09JUL26')
+# Navigraph DFDv2 format: DDMMDDMMYY (e.g. '0907050826')
+MONTH_MAP = {
+    'JAN': '01', 'FEB': '02', 'MAR': '03', 'APR': '04',
+    'MAY': '05', 'JUN': '06', 'JUL': '07', 'AUG': '08',
+    'SEP': '09', 'OCT': '10', 'NOV': '11', 'DEC': '12',
+}
+
+
+def fenix_date_to_parts(date_str: str) -> tuple[str, str, str]:
+    """
+    Convert Fenix date to Navigraph format parts.
+
+    '09JUL26' -> ('09', '07', '26')
+    """
+    day = date_str[:2]
+    month_abbr = date_str[2:5].upper()
+    year = date_str[5:]
+    month = MONTH_MAP.get(month_abbr, '01')
+    yy = year[-2:] if len(year) >= 2 else year.zfill(2)
+    return day, month, yy
+
+
 def convert_header(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection):
     """
     Update tbl_hdr_header in destination with cycle info from Fenix config.
 
-    If the header table already has a row, update it; otherwise insert.
-    Only runs if the header doesn't already exist for this cycle.
+    Reads CycleName, CycleStartDate, CycleEndDate from Fenix config table
+    and writes proper Navigraph DFDv2 header format.
     """
     # Read Fenix config
     config = {}
     for row in src_conn.execute("SELECT key, val FROM config"):
         config[row['key']] = row['val']
 
-    cycle_name = config.get('CycleName', '2607')
-    cycle = cycle_name[:4]  # "2607n2" → "2607"
-    start = config.get('CycleStartDate', '09JUL26')
-    end = config.get('CycleEndDate', '05AUG26')
-    # Format: DDMMMYYYY → DDbMMbYYYY (no separators, consistent with Navigraph)
-    effective = f"{start[:2]}{start[2:5]}{start[5:]}{end[:2]}{end[2:5]}{end[5:]}"
+    # Use full cycle name (e.g. '2607n2'), not truncated
+    cycle = config.get('CycleName', '2607')
+
+    start_raw = config.get('CycleStartDate', '09JUL26')
+    end_raw = config.get('CycleEndDate', '05AUG26')
+
+    # Convert to Navigraph DDMMDDMMYY format
+    start_d, start_m, start_y = fenix_date_to_parts(start_raw)
+    end_d, end_m, end_y = fenix_date_to_parts(end_raw)
+    effective = f"{start_d}{start_m}{end_d}{end_m}{end_y}"  # e.g. '0907050826'
+
+    print(f"  Fenix cycle: {cycle} ({start_raw} - {end_raw})")
+    print(f"  Navigraph effective_fromto: {effective}")
+
+    now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')
 
     # Check if header exists
     existing = dst_conn.execute("SELECT COUNT(*) FROM tbl_hdr_header").fetchone()[0]
     if existing > 0:
-        print(f"  [tbl_hdr_header] already has {existing} row(s), updating cycle info")
+        print(f"  [tbl_hdr_header] updating existing row with cycle {cycle}")
         dst_conn.execute("""
             UPDATE tbl_hdr_header
             SET cycle = ?, effective_fromto = ?, parsed_at = ?
-        """, (cycle, effective, datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')))
+        """, (cycle, effective, now_str))
     else:
         dst_conn.execute("""
             INSERT INTO tbl_hdr_header
@@ -46,9 +78,22 @@ def convert_header(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection):
             '2.0.24.1017',
             'NG_FWDFD',
             effective,
-            datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ'),
+            now_str,
             '001'
         ))
         print(f"  [tbl_hdr_header] created with cycle {cycle}")
 
     dst_conn.commit()
+
+    # Return cycle info for cycle.json generation
+    return {
+        'cycle': cycle,
+        'start_raw': start_raw,
+        'end_raw': end_raw,
+        'start_d': start_d,
+        'start_m': start_m,
+        'start_y': start_y,
+        'end_d': end_d,
+        'end_m': end_m,
+        'end_y': end_y,
+    }

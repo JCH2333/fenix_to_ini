@@ -1,8 +1,19 @@
 ===============================================================================
   Fenix -> iniBuilds 导航数据转换工具
-  AIRAC Cycle 2607 - 中国区域数据补充
+  中国区域数据补充 (NAIP)
   https://github.com/JCH2333/fenix_to_ini
 ===============================================================================
+
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  !!  重要提示: 本工具必须使用含有 NAIP 中国数据的 Fenix 机模导航数据      !!
+  !!                                                                         !!
+  !!  普通 Navigraph 订阅的 Fenix 导航数据仅有约 92 个中国机场，不含完整    !!
+  !!  的 NAIP 进离场程序。转换后不会有明显增加。                            !!
+  !!                                                                         !!
+  !!  只有包含 NAIP 数据的 Fenix nd.db3 (约 281 个中国机场，含完整 SID/     !!
+  !!  STAR/IAP 程序) 才能正常使用本工具。                                   !!
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 
 一、简介
 --------
@@ -18,13 +29,15 @@ DFDv2 格式 (db.s3db)，补充到 MSFS2020/2024 的 iniBuilds 机模中。
 原理: 将 Fenix nd.db3 中有而 iniBuilds db.s3db 中没有的中国机场、
       跑道、导航台、航路、进离场程序数据补充到 iniBuilds 数据库中。
 
+转换后的导航数据周期与源 Fenix 数据保持一致。
+
 
 二、系统要求
 -------------
 
 - Windows 10/11
 - Python 3.10 及以上 (需 tkinter, 通常随 Python 一起安装)
-- Fenix A320 导航数据 (nd.db3, 通常位于 C:\ProgramData\Fenix\Navdata\)
+- 含 NAIP 数据的 Fenix A320 导航数据 (nd.db3)
 - iniBuilds 机模已安装 (MSFS2020 或 MSFS2024)
 
 
@@ -35,7 +48,7 @@ DFDv2 格式 (db.s3db)，补充到 MSFS2020/2024 的 iniBuilds 机模中。
    python gui.py
 
 2. 点击 "自动检测路径" 按钮，工具会自动查找:
-   - Fenix nd.db3 (C:\ProgramData\Fenix\Navdata\)
+   - Fenix nd.db3 (优先脚本所在目录，其次 C:\ProgramData\Fenix\Navdata\)
    - iniBuilds db.s3db (MSFS2024 WASM 或 MSFS2020 packages 目录)
 
 3. 确认弹窗中的路径是否正确，点击 "是" 自动填入
@@ -110,12 +123,13 @@ MSFS2020:
 
 Fenix (共用):
   C:\ProgramData\Fenix\Navdata\nd.db3
+  (或脚本所在目录的父级目录中的 nd.db3)
 
 
 七、转换阶段说明
 -----------------
 
-Phase 0: 元数据更新
+Phase 0: 元数据更新 (周期、日期、cycle.json)
 Phase 1: 机场 (新增约 190 个中国机场)
 Phase 2: 跑道
 Phase 3: 导航台 (VHF VOR/DME, NDB)
@@ -133,7 +147,7 @@ Phase 9: 兼容表创建
 1. 转换前请确保 MSFS 未运行，否则 s3db 文件可能被锁定
 2. 首次使用建议先运行 --dry-run 查看预期结果
 3. 转换后可在 MSFS 中测试 ZBAA, ZSPD 等机场的 SID/STAR
-4. 每 28 天 AIRAC 更新后需重新运行转换
+4. 每次 AIRAC 更新后需重新运行转换
 5. 如有问题请查看 GitHub Issues
 
 
