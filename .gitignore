@@ -1,0 +1,27 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Database files (large binaries)
+*.db3
+*.s3db
+
+# Input data files
+*.csv
+
+# Runtime backups
+*.backup_*
+backups/
+
+# SQLite temporary files
+*.shm
+*.wal
+*.lock
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
