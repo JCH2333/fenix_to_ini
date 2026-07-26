@@ -21,7 +21,7 @@ def detect_fenix_db() -> str | None:
     Detect Fenix A320 nd.db3 path.
     Priority:
     1. Script's parent directory (may have NAIP-enhanced version)
-    2. C:\ProgramData\Fenix\Navdata\nd.db3 (stock Navigraph)
+    2. C:/ProgramData/Fenix/Navdata/nd.db3 (stock Navigraph)
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
