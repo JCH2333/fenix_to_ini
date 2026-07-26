@@ -19,8 +19,22 @@ def get_appdata() -> str:
 def detect_fenix_db() -> str | None:
     """
     Detect Fenix A320 nd.db3 path.
-    Fenix stores navdata in a fixed location outside the sim.
+    Priority:
+    1. Script's parent directory (may have NAIP-enhanced version)
+    2. C:\ProgramData\Fenix\Navdata\nd.db3 (stock Navigraph)
     """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Check parent directories of the script (up to 3 levels)
+    search_dir = script_dir
+    for _ in range(3):
+        parent = os.path.dirname(search_dir)
+        path = os.path.join(parent, 'nd.db3')
+        if os.path.exists(path):
+            return os.path.normpath(path)
+        search_dir = parent
+
+    # Check ProgramData
     paths = [
         r'C:\ProgramData\Fenix\Navdata\nd.db3',
     ]
