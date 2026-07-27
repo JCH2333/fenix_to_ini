@@ -364,8 +364,12 @@ Examples:
         csv_path = args.csv or detected.get('fenix_csv')
 
         ini_results = detected.get('ini_s3db', {})
-        # Prefer MSFS2024 paths over MSFS2020
-        msfs24_keys = [k for k in ini_results if '2024' in k and 's3db' in k.lower()]
+        # Prefer MSFS2024 paths over MSFS2020. Exclude "目录存在，无s3db"
+        # placeholder entries (directory found but no db.s3db written yet) —
+        # those keys are still labeled "MSFS2024 - ..." so a naive '2024' in k
+        # match would wrongly select a non-existent database and silently
+        # fall through to MSFS2020 instead.
+        msfs24_keys = [k for k in ini_results if '2024' in k and '无s3db' not in k]
         msfs20_keys = [k for k in ini_results if '2020' in k]
         selected_ini = None
         if msfs24_keys:

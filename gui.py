@@ -232,8 +232,10 @@ class ConversionGUI:
 
         msg = '\n'.join(lines)
 
-        # Auto-select best match
-        msfs24_keys = [k for k in ini_results if '2024' in k and 's3db' in k.lower()]
+        # Auto-select best match. Exclude "目录存在，无s3db" placeholder
+        # entries (directory found but no db.s3db written yet) — see main.py
+        # for the same fix rationale.
+        msfs24_keys = [k for k in ini_results if '2024' in k and '无s3db' not in k]
         msfs20_keys = [k for k in ini_results if '2020' in k]
         selected_ini = None
         selected_label = None
