@@ -175,60 +175,64 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         proc_ident = (terminal['Name'] or '').strip()[:6]
         rwy = normalize_runway(terminal['Rwy'] or '')
 
-        # Find all unique transitions and runways for this procedure
-        transitions, runways = _collect_transitions_and_runways(legs, terminal, rwy)
+        # Find all unique transitions for this procedure. Runway-specific
+        # legs are already represented as transitions named "RWxx" (see
+        # _collect_transitions_and_runways), so there is no separate
+        # "runway" dimension to loop over — the destination tables
+        # (tbl_pd_sids/tbl_pe_stars/tbl_pf_iaps) have no runway_identifier
+        # column at all, so looping transitions × runways previously
+        # produced byte-for-byte duplicate rows for every runway sharing
+        # the same 'ALL' legs.
+        transitions, _ = _collect_transitions_and_runways(legs, terminal, rwy)
 
-        # If no specific runway, use the terminal's runway
-        if not runways:
-            runways = {rwy} if rwy else {'ALL'}
-
-        # Process each transition+runway combination
         for transition in transitions:
-            for runway in runways:
-                # Get legs for this transition
-                trans_legs = [l for l in legs
-                              if l['Transition'] == transition or
-                              l['Transition'] == 'ALL']
+            # Get legs for this transition: transition-specific legs plus
+            # any legs common to all transitions ('ALL')
+            trans_legs = [l for l in legs
+                          if l['Transition'] == transition or
+                          l['Transition'] == 'ALL']
 
-                if not trans_legs:
+            if not trans_legs:
+                continue
+
+            # Sort legs by their order in the procedure
+            trans_legs.sort(key=lambda l: l['ID'])
+
+            # Generate seqno
+            for i, leg in enumerate(trans_legs):
+                seqno = (i + 1) * 10
+
+                row = _build_procedure_row(
+                    leg, icao, proc_ident, transition, rwy,
+                    seqno, waypoint_lookup, navaid_lookup,
+                    legs_ex.get(leg['ID'])
+                )
+
+                if row is None:
                     continue
 
-                # Sort legs by their order in the procedure
-                trans_legs.sort(key=lambda l: l['ID'])
+                # Dedup check (matches the destination table's actual
+                # columns — there is no runway_identifier column)
+                dedup_key = (
+                    icao, proc_ident, transition or '',
+                    seqno, row[15]  # path_termination
+                )
+                if dedup_key in existing.get(table_name, set()):
+                    stats['skipped'] += 1
+                    continue
+                existing.setdefault(table_name, set()).add(dedup_key)
 
-                # Generate seqno
-                for i, leg in enumerate(trans_legs):
-                    seqno = (i + 1) * 10
-
-                    row = _build_procedure_row(
-                        leg, icao, proc_ident, transition, runway,
-                        seqno, waypoint_lookup, navaid_lookup,
-                        legs_ex.get(leg['ID'])
-                    )
-
-                    if row is None:
-                        continue
-
-                    # Dedup check
-                    dedup_key = (
-                        icao, proc_ident, transition or '',
-                        runway, seqno, row[15]  # path_termination
-                    )
-                    if dedup_key in existing.get(table_name, set()):
-                        stats['skipped'] += 1
-                        continue
-
-                    if table_name == 'tbl_pd_sids':
-                        sid_rows.append(row)
-                        stats['sid'] += 1
-                    elif table_name == 'tbl_pe_stars':
-                        star_rows.append(row)
-                        stats['star'] += 1
-                    elif table_name == 'tbl_pf_iaps':
-                        # Add IAP-specific columns
-                        iap_extra = (None, None, None, None, None, None)
-                        iap_rows.append(row + iap_extra)
-                        stats['iap'] += 1
+                if table_name == 'tbl_pd_sids':
+                    sid_rows.append(row)
+                    stats['sid'] += 1
+                elif table_name == 'tbl_pe_stars':
+                    star_rows.append(row)
+                    stats['star'] += 1
+                elif table_name == 'tbl_pf_iaps':
+                    # Add IAP-specific columns
+                    iap_extra = (None, None, None, None, None, None)
+                    iap_rows.append(row + iap_extra)
+                    stats['iap'] += 1
 
     # Insert into target tables
     from db_utils import batch_insert  # type: ignore[import-untyped]
@@ -240,10 +244,10 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
     if iap_rows:
         batch_insert(dst_conn, 'tbl_pf_iaps', TBL_PF_COLUMNS, iap_rows)
 
-    print(f"  SIDs inserted: {stats['sid']}")
-    print(f"  STARs inserted: {stats['star']}")
-    print(f"  IAPs inserted: {stats['iap']}")
-    print(f"  Skipped (existing): {stats['skipped']}")
+    print(f"  新增 SID: {stats['sid']}")
+    print(f"  新增 STAR: {stats['star']}")
+    print(f"  新增 IAP: {stats['iap']}")
+    print(f"  已存在跳过: {stats['skipped']}")
 
 
 def _collect_transitions_and_runways(legs: list, terminal, default_rwy: str) -> tuple[set, set]:
@@ -420,14 +424,18 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
 
 
 def _load_existing_procedures(dst_conn: sqlite3.Connection) -> dict:
-    """Load existing procedure identifiers for dedup."""
+    """Load existing procedure identifiers for dedup.
+
+    Note: tbl_pd_sids/tbl_pe_stars/tbl_pf_iaps have no runway_identifier
+    column, so the dedup key only covers the columns that actually exist.
+    """
     existing = {}
     for table in ['tbl_pd_sids', 'tbl_pe_stars', 'tbl_pf_iaps']:
         keys = set()
         try:
             rows = dst_conn.execute(f"""
                 SELECT airport_identifier, procedure_identifier,
-                       transition_identifier, runway_identifier, seqno, path_termination
+                       transition_identifier, seqno, path_termination
                 FROM {table}
             """).fetchall()
             for r in rows:
@@ -435,7 +443,6 @@ def _load_existing_procedures(dst_conn: sqlite3.Connection) -> dict:
                     r['airport_identifier'],
                     r['procedure_identifier'],
                     r['transition_identifier'] or '',
-                    r['runway_identifier'] or '',
                     r['seqno'],
                     r['path_termination'],
                 ))

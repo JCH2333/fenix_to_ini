@@ -12,7 +12,8 @@ if _parent_dir not in sys.path:
 
 import sqlite3
 from mappings import map_surface  # type: ignore[import-untyped]
-from db_utils import batch_insert  # type: ignore[import-untyped]
+from db_utils import batch_upsert  # type: ignore[import-untyped]
+from geomag import get_magnetic_declination, apply_magnetic_variation  # type: ignore[import-untyped]
 
 
 # Columns in tbl_pg_runways
@@ -46,6 +47,11 @@ def convert_runways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
     """
     Convert runways for Chinese airports.
 
+    Uses UPSERT: existing runways are refreshed with the latest Fenix
+    data, new runways are inserted. Magnetic bearing is computed from
+    true bearing using the WMM (via pygeomag) instead of copying true
+    bearing directly.
+
     Args:
         airport_lookup: Dict mapping Fenix AirportID → ICAO code
     """
@@ -78,7 +84,7 @@ def convert_runways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
     print(f"  Fenix total runways: {len(fenix_runways)}")
     print(f"  Fenix Chinese runways: {len(cn_runways)}")
 
-    # Get existing runways for dedup
+    # Get existing runways (for new vs. updated reporting)
     existing = set()
     for row in dst_conn.execute(
         "SELECT airport_identifier, runway_identifier FROM tbl_pg_runways"
@@ -86,8 +92,10 @@ def convert_runways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
         existing.add((row['airport_identifier'], row['runway_identifier']))
 
     # Build rows
-    new_rows = []
-    skipped = 0
+    upsert_rows = []
+    new_count = 0
+    updated_count = 0
+    magvar_fail_count = 0
 
     for r in cn_runways:
         icao = airport_lookup.get(r['AirportID'])
@@ -103,8 +111,9 @@ def convert_runways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
 
         key = (icao, rwy_ident)
         if key in existing:
-            skipped += 1
-            continue
+            updated_count += 1
+        else:
+            new_count += 1
 
         # Get ILS info
         ils = ils_info.get(r['ID'])
@@ -120,10 +129,16 @@ def convert_runways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
         # Surface mapping
         surface = map_surface(r['Surface'])
 
-        # Magnetic bearing = true heading - magnetic variation (approximate)
-        # For now use true bearing directly; magvar correction can be refined
+        # Magnetic bearing = true bearing corrected by WMM magnetic declination
         true_hdg = r['TrueHeading'] or 0.0
-        mag_bearing = true_hdg  # Will be close enough; exact magvar needs WMM
+        lat = r['Latitude'] or 0.0
+        lon = r['Longtitude'] or 0.0
+        mag_var = get_magnetic_declination(lat, lon)
+        if mag_var is None:
+            magvar_fail_count += 1
+            mag_bearing = true_hdg  # Fallback: true ≈ mag when WMM unavailable
+        else:
+            mag_bearing = apply_magnetic_variation(true_hdg, mag_var)
 
         # Area code and ICAO code
         area_code = 'EEU'
@@ -140,10 +155,10 @@ def convert_runways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
             'N',                     # part_time_lights
             0.0,                     # runway_gradient
             rwy_ident,               # runway_identifier
-            r['Latitude'] or 0.0,    # runway_latitude
+            lat,                     # runway_latitude
             r['Length'] or 0,        # runway_length
             'N',                     # runway_lights (default no lights info)
-            r['Longtitude'] or 0.0,  # runway_longitude
+            lon,                     # runway_longitude
             mag_bearing,             # runway_magnetic_bearing
             true_hdg,                # runway_true_bearing
             r['Width'] or 0,         # runway_width
@@ -152,12 +167,16 @@ def convert_runways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
             None,                    # traffic_pattern_altitude
             'L',                     # traffic_pattern (L=left default)
         )
-        new_rows.append(row_data)
+        upsert_rows.append(row_data)
 
-    inserted = batch_insert(dst_conn, 'tbl_pg_runways', TBL_PG_COLUMNS, new_rows)
+    total = batch_upsert(dst_conn, 'tbl_pg_runways', TBL_PG_COLUMNS, upsert_rows,
+                         conflict_columns=['airport_identifier', 'runway_identifier'])
 
-    print(f"  New runways inserted: {inserted}")
-    print(f"  Already existing (skipped): {skipped}")
+    print(f"  新增跑道: {new_count}")
+    print(f"  更新跑道: {updated_count}")
+    print(f"  合计处理: {total}")
+    if magvar_fail_count:
+        print(f"  警告：{magvar_fail_count} 条跑道无法计算磁偏角，磁方位暂用真方位替代")
 
     # Build lookup: RunwayID → (ICAO, runway_identifier, true_heading)
     runway_lookup = {}

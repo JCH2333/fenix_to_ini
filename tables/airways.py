@@ -271,8 +271,18 @@ def convert_airways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
 
         if has_cn_point:
             for seg in segments:
-                # Check if already exists
-                dedup_key = (seg[12], seg[14], seg[15])  # route, seqno, wpt_ident
+                # Check if already exists.
+                # seg tuple layout: (area_code0, 'XX'1, None2, level3, icao_code4,
+                #   inbound_course5, inbound_dist6, 99999(7=max_alt), 6000(8=min_alt), None9,
+                #   outbound_course10, None11, airway_ident12, route_type13, seqno14,
+                #   None15(=waypoint_description_code), ident16, lat17, lon18, wpt_ref_table19)
+                # NOTE: must dedup on seg[16] (the actual waypoint identifier),
+                # not seg[15] (always None) — using index 15 made the dedup key
+                # (route, seqno, None) which never matches the real
+                # (route_identifier, seqno, waypoint_identifier) rows already in
+                # the destination table, causing every re-run to duplicate all
+                # Chinese airway segments.
+                dedup_key = (seg[12], seg[14], seg[16])  # route, seqno, wpt_ident
                 if dedup_key not in existing_airways:
                     new_rows.append(seg)
                     existing_airways.add(dedup_key)

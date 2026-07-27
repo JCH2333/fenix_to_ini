@@ -1,1 +1,3 @@
-# No external dependencies required - Python stdlib + sqlite3 only
+# 依赖：Python 标准库 sqlite3, csv, tkinter (GUI) 已随 Python 自带
+# 磁变量计算需要 pygeomag（世界磁场模型 WMM 计算库）
+pygeomag>=1.0.0

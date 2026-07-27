@@ -13,7 +13,7 @@ if _parent_dir not in sys.path:
 
 import sqlite3
 from mappings import is_cn_airport  # type: ignore[import-untyped]
-from db_utils import batch_insert  # type: ignore[import-untyped]
+from db_utils import batch_upsert  # type: ignore[import-untyped]
 
 
 # Columns in tbl_pa_airports (from schema analysis)
@@ -49,7 +49,8 @@ def convert_airports(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection)
     """
     Convert Chinese airspace airports from Fenix to iniBuilds.
 
-    Skips airports already present in the destination.
+    Uses UPSERT: existing airports get their fields refreshed with the
+    latest Fenix data; new airports are inserted.
     """
     print("\n=== Phase 1: Airports ===")
 
@@ -71,21 +72,23 @@ def convert_airports(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection)
     print(f"  Fenix total airports: {len(fenix_rows)}")
     print(f"  Fenix Chinese airports: {len(cn_airports)}")
 
-    # Get existing airport identifiers for dedup
+    # Get existing airport identifiers (for new vs. updated reporting)
     existing = set()
     for row in dst_conn.execute("SELECT airport_identifier FROM tbl_pa_airports"):
         existing.add(row['airport_identifier'])
 
     print(f"  Existing in target: {len(existing)} total")
 
-    # Build rows for insert
-    new_rows = []
-    skipped = 0
+    # Build rows for upsert
+    upsert_rows = []
+    new_count = 0
+    updated_count = 0
     for a in cn_airports:
         icao = a['ICAO']
         if icao in existing:
-            skipped += 1
-            continue
+            updated_count += 1
+        else:
+            new_count += 1
 
         # Determine area_code: use 'EEU' for Chinese airspace (matches existing data)
         # icao_code is first 2 chars of ICAO
@@ -132,13 +135,15 @@ def convert_airports(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection)
             trans_alt,                            # transition_altitude
             trans_level,                          # transition_level
         )
-        new_rows.append(row_data)
+        upsert_rows.append(row_data)
 
-    # Batch insert
-    inserted = batch_insert(dst_conn, 'tbl_pa_airports', TBL_PA_COLUMNS, new_rows)
+    # Batch upsert (insert new, update existing)
+    total = batch_upsert(dst_conn, 'tbl_pa_airports', TBL_PA_COLUMNS, upsert_rows,
+                         conflict_columns=['airport_identifier'])
 
-    print(f"  New airports inserted: {inserted}")
-    print(f"  Already existing (skipped): {skipped}")
+    print(f"  新增机场: {new_count}")
+    print(f"  更新机场: {updated_count}")
+    print(f"  合计处理: {total}")
 
     # Build lookup: AirportID → ICAO for downstream use
     airport_lookup = {}

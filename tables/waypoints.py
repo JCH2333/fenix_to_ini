@@ -12,6 +12,7 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 import sqlite3
+from region_lookup import RegionLookup  # type: ignore[import-untyped]
 
 
 # Columns for enroute waypoints
@@ -58,39 +59,61 @@ def is_cn_airspace(lat: float, lon: float) -> bool:
             CN_LON_MIN <= lon <= CN_LON_MAX)
 
 
-def derive_area_icao(lat: float, lon: float) -> tuple[str, str, str]:
-    """Derive area_code, icao_code, and region_code from coordinates."""
+def derive_area_icao(lat: float, lon: float, ident: str = '',
+                     region_lookup: 'RegionLookup | None' = None,
+                     nearest_apt: str | None = None) -> tuple[str, str, str]:
+    """
+    Derive area_code, icao_code, and region_code for a waypoint.
+
+    Priority:
+    1. Cross-reference against 2607 NAIP CSV FIR data (most accurate)
+    2. Fall back to nearest Chinese airport's ICAO prefix
+    3. Fall back to a coarse longitude-based bucket (least accurate, last resort)
+    """
     area_code = 'EEU'
+
+    # 1. Cross-reference against 2607 CSV FIR data
+    if region_lookup is not None:
+        icao_code = region_lookup.get_waypoint_icao(ident)
+        if icao_code:
+            return area_code, icao_code, icao_code
+
+    # 2. Fall back to nearest airport's ICAO prefix
+    if nearest_apt and len(nearest_apt) >= 2:
+        icao_code = nearest_apt[:2]
+        return area_code, icao_code, icao_code
+
+    # 3. Last-resort coarse longitude bucket
     if lon < 97:
         icao_code = 'ZW'
-        region_code = 'ZW'
     elif lon < 106:
         icao_code = 'ZL'
-        region_code = 'ZL'
     elif lon < 114:
         icao_code = 'ZB'
-        region_code = 'ZB'
     elif lon < 120:
         icao_code = 'ZS'
-        region_code = 'ZS'
-    elif lon < 128:
-        icao_code = 'ZY'
-        region_code = 'ZY'
     else:
         icao_code = 'ZY'
-        region_code = 'ZY'
-    return area_code, icao_code, region_code
+    return area_code, icao_code, icao_code
 
 
 def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
-                      airport_lookup: dict[int, str]):
+                      airport_lookup: dict[int, str],
+                      region_lookup: 'RegionLookup | None' = None):
     """
     Convert Chinese airspace waypoints to iniBuilds format.
 
+    Uses UPSERT: existing waypoints are refreshed with the latest Fenix
+    data, new waypoints are inserted.
+
     Args:
         airport_lookup: Dict mapping Fenix AirportID → ICAO code
+        region_lookup: Optional RegionLookup for accurate FIR-based icao_code
     """
     print("\n=== Phase 4: Waypoints ===")
+
+    if region_lookup is None:
+        region_lookup = RegionLookup()
 
     # Step 1: Get all waypoint IDs referenced in TerminalLegs (for Chinese terminals only)
     # First, get Chinese Terminal IDs
@@ -138,7 +161,14 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
             'name': w['Name'] or '',
         }
 
-    # Step 3: Get existing waypoints for dedup
+    # Chinese airport coordinates for nearest-airport fallback
+    cn_airport_coords = {}
+    for row in src_conn.execute("SELECT ID, ICAO, Latitude, Longtitude FROM Airports"):
+        aid = row['ID']
+        if aid in airport_lookup:
+            cn_airport_coords[row['ICAO']] = (row['Latitude'], row['Longtitude'])
+
+    # Step 3: Get existing waypoints (for new vs. updated reporting)
     existing_ea = set()
     for row in dst_conn.execute("SELECT waypoint_identifier FROM tbl_ea_enroute_waypoints"):
         existing_ea.add(row['waypoint_identifier'])
@@ -150,8 +180,10 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
     # Step 4: Build rows for enroute and terminal waypoints
     ea_rows = []
     pc_rows = []
-    ea_skipped = 0
-    pc_skipped = 0
+    ea_new = 0
+    ea_updated = 0
+    pc_new = 0
+    pc_updated = 0
 
     for w in cn_waypoints:
         wpt_id = w['ID']
@@ -163,7 +195,14 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
         if not ident:
             continue
 
-        area_code, icao_code, region_code = derive_area_icao(lat, lon)
+        # Find nearest Chinese airport for fallback region assignment
+        nearest_apt = None
+        for apt_icao, (apt_lat, apt_lon) in cn_airport_coords.items():
+            if abs(lat - apt_lat) < 5 and abs(lon - apt_lon) < 5:
+                nearest_apt = apt_icao
+                break
+
+        area_code, icao_code, region_code = derive_area_icao(lat, lon, ident, region_lookup, nearest_apt)
 
         # Determine waypoint type and usage
         collocated = w['Collocated']
@@ -184,23 +223,24 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
         # Column order: area_code, continent, country, datum_code, icao_code,
         #               magnetic_variation, waypoint_identifier, waypoint_latitude,
         #               waypoint_longitude, waypoint_name, waypoint_type, waypoint_usage
-        if ident not in existing_ea:
-            ea_rows.append((
-                area_code,        # area_code
-                None,             # continent
-                None,             # country
-                'WGE',            # datum_code
-                icao_code,        # icao_code
-                None,             # magnetic_variation
-                ident,            # waypoint_identifier
-                lat,              # waypoint_latitude
-                lon,              # waypoint_longitude
-                name,             # waypoint_name
-                wpt_type,         # waypoint_type
-                usage,            # waypoint_usage
-            ))
+        if ident in existing_ea:
+            ea_updated += 1
         else:
-            ea_skipped += 1
+            ea_new += 1
+        ea_rows.append((
+            area_code,        # area_code
+            None,             # continent
+            None,             # country
+            'WGE',            # datum_code
+            icao_code,        # icao_code
+            None,             # magnetic_variation
+            ident,            # waypoint_identifier
+            lat,              # waypoint_latitude
+            lon,              # waypoint_longitude
+            name,             # waypoint_name
+            wpt_type,         # waypoint_type
+            usage,            # waypoint_usage
+        ))
 
         # Terminal waypoints
         # Column order: area_code, continent, country, datum_code, icao_code,
@@ -208,29 +248,32 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
         #               waypoint_latitude, waypoint_longitude, waypoint_name, waypoint_type
         if is_terminal:
             pc_key = (ident, region_code)
-            if pc_key not in existing_pc:
-                pc_rows.append((
-                    area_code,        # area_code
-                    None,             # continent
-                    None,             # country
-                    'WGE',            # datum_code
-                    icao_code,        # icao_code
-                    None,             # magnetic_variation
-                    region_code,      # region_code
-                    ident,            # waypoint_identifier
-                    lat,              # waypoint_latitude
-                    lon,              # waypoint_longitude
-                    name,             # waypoint_name
-                    wpt_type,         # waypoint_type
-                ))
+            if pc_key in existing_pc:
+                pc_updated += 1
             else:
-                pc_skipped += 1
+                pc_new += 1
+            pc_rows.append((
+                area_code,        # area_code
+                None,             # continent
+                None,             # country
+                'WGE',            # datum_code
+                icao_code,        # icao_code
+                None,             # magnetic_variation
+                region_code,      # region_code
+                ident,            # waypoint_identifier
+                lat,              # waypoint_latitude
+                lon,              # waypoint_longitude
+                name,             # waypoint_name
+                wpt_type,         # waypoint_type
+            ))
 
-    from db_utils import batch_insert  # type: ignore[import-untyped]
-    print(f"  Enroute waypoints to insert: {len(ea_rows)}, skipped: {ea_skipped}")
-    batch_insert(dst_conn, 'tbl_ea_enroute_waypoints', TBL_EA_COLUMNS, ea_rows)
+    from db_utils import batch_upsert  # type: ignore[import-untyped]
+    print(f"  航路点: 新增 {ea_new}, 更新 {ea_updated}")
+    batch_upsert(dst_conn, 'tbl_ea_enroute_waypoints', TBL_EA_COLUMNS, ea_rows,
+                conflict_columns=['waypoint_identifier', 'icao_code'])
 
-    print(f"  Terminal waypoints to insert: {len(pc_rows)}, skipped: {pc_skipped}")
-    batch_insert(dst_conn, 'tbl_pc_terminal_waypoints', TBL_PC_COLUMNS, pc_rows)
+    print(f"  终端航路点: 新增 {pc_new}, 更新 {pc_updated}")
+    batch_upsert(dst_conn, 'tbl_pc_terminal_waypoints', TBL_PC_COLUMNS, pc_rows,
+                conflict_columns=['waypoint_identifier', 'region_code'])
 
     return waypoint_lookup, terminal_wpt_ids

@@ -42,6 +42,7 @@ from tables.rest import (
 )
 from tables.empty_tables import create_empty_tables
 from rte_seg import parse_rte_seg, resolve_coordinates, merge_rte_seg_to_airways
+from region_lookup import RegionLookup
 
 
 # Default log/print callback (can be overridden by GUI)
@@ -206,6 +207,9 @@ def run_conversion(
         advance("Phase 0: Header & Metadata")
         cycle_info = convert_header(src_conn, dst_conn)
 
+        # 初始化 2607 NAIP CSV 区域码交叉参考（用于修正 icao_code 区域分配）
+        region_lookup = RegionLookup()
+
         # === Phase 1 ===
         advance("Phase 1: Airports")
         airport_lookup = convert_airports(src_conn, dst_conn)
@@ -219,12 +223,12 @@ def run_conversion(
 
             # === Phase 3 ===
             advance("Phase 3: Navaids")
-            navaid_lookup = convert_navaids(src_conn, dst_conn, airport_lookup)
+            navaid_lookup = convert_navaids(src_conn, dst_conn, airport_lookup, region_lookup)
 
             # === Phase 4 ===
             advance("Phase 4: Waypoints")
             waypoint_lookup, terminal_wpt_ids = convert_waypoints(
-                src_conn, dst_conn, airport_lookup
+                src_conn, dst_conn, airport_lookup, region_lookup
             )
 
             # === Phase 5 ===
@@ -371,10 +375,10 @@ Examples:
         dst_path = args.dst or selected_ini
 
         if not src_path:
-            print("ERROR: Could not auto-detect Fenix nd.db3")
+            print("错误：无法自动检测 Fenix nd.db3")
             sys.exit(1)
         if not dst_path:
-            print("ERROR: Could not auto-detect iniBuilds db.s3db")
+            print("错误：无法自动检测 iniBuilds db.s3db")
             sys.exit(1)
     else:
         script_dir = os.path.dirname(os.path.abspath(__file__))

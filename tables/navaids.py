@@ -12,8 +12,9 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 import sqlite3
-from freq import decode_freq  # type: ignore[import-untyped]
+from freq import decode_freq, is_valid_frequency  # type: ignore[import-untyped]
 from mappings import VHF_NAVAID_TYPES, NDB_NAVAID_TYPES, get_navaid_class  # type: ignore[import-untyped]
+from region_lookup import RegionLookup  # type: ignore[import-untyped]
 
 
 # Chinese airspace bounding box (approximate)
@@ -74,15 +75,31 @@ def is_cn_airspace(lat: float, lon: float) -> bool:
             CN_LON_MIN <= lon <= CN_LON_MAX)
 
 
-def derive_area_icao(lat: float, lon: float) -> tuple[str, str]:
+def derive_area_icao(lat: float, lon: float, ident: str = '',
+                     region_lookup: 'RegionLookup | None' = None,
+                     nearest_apt: str | None = None) -> tuple[str, str]:
     """
-    Derive area_code and icao_code from coordinates.
-    For China, area_code='EEU', icao_code derived from region.
+    Derive area_code and icao_code for a navaid/waypoint.
+
+    Priority:
+    1. Cross-reference against 2607 NAIP CSV FIR data (most accurate)
+    2. Fall back to nearest Chinese airport's ICAO prefix
+    3. Fall back to a coarse longitude-based bucket (least accurate, last resort)
     """
-    # All Chinese airspace uses EEU in iniBuilds data
     area_code = 'EEU'
 
-    # Determine icao_code based on FIR regions (approximate)
+    # 1. Cross-reference against 2607 CSV FIR data
+    if region_lookup is not None:
+        icao_code = region_lookup.get_navaid_icao(ident)
+        if icao_code:
+            return area_code, icao_code
+
+    # 2. Fall back to nearest airport's ICAO prefix
+    if nearest_apt and len(nearest_apt) >= 2:
+        return area_code, nearest_apt[:2]
+
+    # 3. Last-resort coarse longitude bucket (known to be inaccurate near
+    #    FIR boundaries; only used when no better data is available)
     if lon < 97:
         icao_code = 'ZW'  # Xinjiang
     elif lon < 106:
@@ -91,23 +108,32 @@ def derive_area_icao(lat: float, lon: float) -> tuple[str, str]:
         icao_code = 'ZB'  # Beijing
     elif lon < 120:
         icao_code = 'ZS'  # Shanghai
-    elif lon < 128:
-        icao_code = 'ZY'  # Shenyang
     else:
-        icao_code = 'ZY'  # Far east
+        icao_code = 'ZY'  # Shenyang / far east
 
     return area_code, icao_code
 
 
 def convert_navaids(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
-                    airport_lookup: dict[int, str]):
+                    airport_lookup: dict[int, str],
+                    region_lookup: 'RegionLookup | None' = None):
     """
     Convert Chinese airspace navaids to iniBuilds format.
 
+    Uses UPSERT: existing navaids are refreshed with the latest Fenix
+    data, new navaids are inserted. Navaids whose decoded frequency
+    falls outside the valid band for their type (e.g. foreign military
+    TACAN stations using a different frequency scheme) are skipped with
+    a warning instead of being written with bogus data.
+
     Args:
         airport_lookup: Dict mapping Fenix AirportID → ICAO code
+        region_lookup: Optional RegionLookup for accurate FIR-based icao_code
     """
     print("\n=== Phase 3: Navaids ===")
+
+    if region_lookup is None:
+        region_lookup = RegionLookup()
 
     # Get all Fenix navaids
     fenix_navaids = src_conn.execute("""
@@ -137,10 +163,13 @@ def convert_navaids(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
     # Filter navaids in Chinese airspace
     vhf_rows = []
     ndb_rows = []
-    vhf_skipped = 0
-    ndb_skipped = 0
+    vhf_new = 0
+    vhf_updated = 0
+    ndb_new = 0
+    ndb_updated = 0
+    freq_rejected = 0
 
-    # Get existing navaid identifiers for dedup
+    # Get existing navaid identifiers (for new vs. updated reporting)
     existing_vhf = set()
     for row in dst_conn.execute("SELECT navaid_identifier FROM tbl_d_vhfnavaids"):
         existing_vhf.add(row['navaid_identifier'])
@@ -165,6 +194,15 @@ def convert_navaids(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
         if not ident:
             continue
 
+        freq = decode_freq(n['Freq'], ntype)
+
+        # Reject navaids whose frequency doesn't fall in a plausible band
+        # for their type (e.g. foreign military TACAN using a different
+        # encoding scheme) rather than writing bogus data silently.
+        if not is_valid_frequency(freq, ntype):
+            freq_rejected += 1
+            continue
+
         # Find nearest Chinese airport for context
         nearest_apt = None
         for apt_icao, (apt_lat, apt_lon) in cn_airport_coords.items():
@@ -173,14 +211,14 @@ def convert_navaids(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
                 nearest_apt = apt_icao
                 break
 
-        area_code, icao_code = derive_area_icao(lat, lon)
-        freq = decode_freq(n['Freq'], ntype)
+        area_code, icao_code = derive_area_icao(lat, lon, ident, region_lookup, nearest_apt)
         navaid_class = get_navaid_class(ntype, n['Usage'], n['Range'], n['Elevation'])
 
         if ntype in VHF_NAVAID_TYPES:
             if ident in existing_vhf:
-                vhf_skipped += 1
-                continue
+                vhf_updated += 1
+            else:
+                vhf_new += 1
 
             row_data = (
                 nearest_apt,                     # airport_identifier
@@ -208,8 +246,9 @@ def convert_navaids(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
 
         elif ntype in NDB_NAVAID_TYPES:
             if ident in existing_ndb:
-                ndb_skipped += 1
-                continue
+                ndb_updated += 1
+            else:
+                ndb_new += 1
 
             row_data = (
                 area_code,                        # area_code
@@ -229,12 +268,15 @@ def convert_navaids(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
             ndb_rows.append(row_data)
 
     print(f"  Fenix total navaids: {len(fenix_navaids)}")
-    print(f"  VHF navaids to insert: {len(vhf_rows)}, skipped: {vhf_skipped}")
-    print(f"  NDB navaids to insert: {len(ndb_rows)}, skipped: {ndb_skipped}")
+    print(f"  频率越界被拒绝: {freq_rejected}")
+    print(f"  VHF 导航台: 新增 {vhf_new}, 更新 {vhf_updated}")
+    print(f"  NDB 导航台: 新增 {ndb_new}, 更新 {ndb_updated}")
 
-    from db_utils import batch_insert  # type: ignore[import-untyped]
-    batch_insert(dst_conn, 'tbl_d_vhfnavaids', TBL_D_COLUMNS, vhf_rows)
-    batch_insert(dst_conn, 'tbl_db_enroute_ndbnavaids', TBL_DB_COLUMNS, ndb_rows)
+    from db_utils import batch_upsert  # type: ignore[import-untyped]
+    batch_upsert(dst_conn, 'tbl_d_vhfnavaids', TBL_D_COLUMNS, vhf_rows,
+                conflict_columns=['navaid_identifier', 'icao_code'])
+    batch_upsert(dst_conn, 'tbl_db_enroute_ndbnavaids', TBL_DB_COLUMNS, ndb_rows,
+                conflict_columns=['navaid_identifier', 'icao_code'])
 
     # Build navaid lookup: NavaidID → {ident, lat, lon, type}
     navaid_lookup = {}

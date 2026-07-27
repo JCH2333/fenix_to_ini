@@ -81,6 +81,92 @@ def batch_insert(conn: sqlite3.Connection, table: str, columns: list[str],
     return total
 
 
+def ensure_unique_index(conn: sqlite3.Connection, table: str, columns: list[str]):
+    """
+    Ensure a unique index exists on the given columns for a table.
+
+    SQLite's `ON CONFLICT` clause requires a UNIQUE constraint or index on
+    the conflict columns. The iniBuilds db.s3db schema does not declare
+    PRIMARY KEY/UNIQUE constraints on most tables, so we create a
+    dedicated unique index (idempotent, safe to call every run) before
+    attempting an UPSERT. This index only affects query planning /
+    constraint enforcement — it does not change how iniBuilds reads the
+    table's columns.
+
+    Some existing db.s3db data (e.g. from earlier stock/Navigraph
+    imports) may already contain duplicate rows on the intended conflict
+    columns. If index creation fails because of that, we deduplicate
+    (keep the first occurrence, drop the rest by rowid) and retry once.
+    """
+    index_name = f"idx_upsert_{table}_{'_'.join(columns)}"
+    col_list = ','.join(columns)
+    try:
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table} ({col_list})"
+        )
+    except sqlite3.IntegrityError:
+        print(f"  [{table}] 发现基于 ({col_list}) 的重复历史记录，正在自动去重...")
+        conn.execute(f"""
+            DELETE FROM {table}
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM {table} GROUP BY {col_list}
+            )
+        """)
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table} ({col_list})"
+        )
+
+
+def batch_upsert(conn: sqlite3.Connection, table: str, columns: list[str],
+                 rows: list[tuple], conflict_columns: list[str], batch_size: int = 5000):
+    """
+    Batch UPSERT (INSERT OR UPDATE) rows into a table with transaction management.
+
+    Automatically ensures a unique index exists on conflict_columns, since
+    SQLite requires one for the ON CONFLICT clause to work and the
+    iniBuilds schema does not declare such constraints natively.
+
+    Args:
+        conn: Target database connection
+        table: Target table name
+        columns: Column names in order
+        rows: List of row tuples matching columns order
+        conflict_columns: Columns that define uniqueness (for ON CONFLICT clause)
+        batch_size: Rows per transaction
+
+    Returns:
+        Number of rows processed
+    """
+    if not rows:
+        print(f"  [{table}] 0 rows to upsert (empty)")
+        return 0
+
+    ensure_unique_index(conn, table, conflict_columns)
+
+    placeholders = ','.join(['?' for _ in columns])
+    col_names = ','.join(columns)
+    conflict_keys = ','.join(conflict_columns)
+
+    # Build UPDATE SET clause (all columns except conflict keys)
+    update_columns = [col for col in columns if col not in conflict_columns]
+    update_set = ','.join([f"{col}=excluded.{col}" for col in update_columns])
+
+    sql = f"""
+        INSERT INTO {table} ({col_names}) VALUES ({placeholders})
+        ON CONFLICT({conflict_keys}) DO UPDATE SET {update_set}
+    """
+
+    total = 0
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        with conn:
+            conn.executemany(sql, batch)
+        total += len(batch)
+
+    print(f"  [{table}] upserted {total} rows")
+    return total
+
+
 def get_existing_ids(conn: sqlite3.Connection, table: str,
                      id_column: str, id_values: list) -> set:
     """

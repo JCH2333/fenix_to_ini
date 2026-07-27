@@ -37,8 +37,12 @@ DFDv2 格式 (db.s3db)，补充到 MSFS2020/2024 的 iniBuilds 机模中。
 
 - Windows 10/11
 - Python 3.10 及以上 (需 tkinter, 通常随 Python 一起安装)
+- pygeomag 库 (用于计算真实磁偏角/磁方位，安装: pip install -r requirements.txt
+  或 pip install pygeomag；未安装时会自动回退为"磁方位≈真方位"的旧行为并打印警告)
 - 含 NAIP 数据的 Fenix A320 导航数据 (nd.db3)
 - iniBuilds 机模已安装 (MSFS2020 或 MSFS2024)
+- (可选) 本地 2607 NAIP CSV 数据目录，用于交叉参考更准确的机场/导航台/
+  航路点区域码 (icao_code)。默认自动探测脚本同级或上级目录中的 2607 文件夹
 
 
 三、快速开始 (GUI 模式)
@@ -100,11 +104,13 @@ python main.py [选项]
 
 main.py          - 命令行入口 / 核心转换引擎
 gui.py           - 图形界面 (tkinter)
-auto_detect.py   - 自动检测导航数据路径
-freq.py          - 频率编解码
+auto_detect.py   - 自动检测导航数据路径 + NAIP 完整性校验
+freq.py          - 频率编解码 + 合法频段校验
 mappings.py      - 常量映射
-db_utils.py      - SQLite 工具
+db_utils.py      - SQLite 工具 (含 UPSERT 覆盖更新)
 merge.py         - 数据统计
+region_lookup.py - 2607 CSV FIR 区域码交叉参考
+geomag.py        - WMM 磁偏角计算 (基于 pygeomag)
 rte_seg.py       - NAIP 航路 CSV 解析
 verify.py        - 转换后验证
 tables/          - 各阶段表转换模块
@@ -148,7 +154,14 @@ Phase 9: 兼容表创建
 2. 首次使用建议先运行 --dry-run 查看预期结果
 3. 转换后可在 MSFS 中测试 ZBAA, ZSPD 等机场的 SID/STAR
 4. 每次 AIRAC 更新后需重新运行转换
-5. 如有问题请查看 GitHub Issues
+5. 本工具会自动检测已装 Fenix nd.db3 是否为含完整 NAIP 数据的版本
+   (通过统计含进离场程序的中国机场数量)，如检测到普通 Navigraph 版本
+   会给出中文警告提示
+6. 机场/跑道/导航台/航路点/ILS 等主表现已支持覆盖更新 (UPSERT)：
+   重复运行转换时，已存在的记录会用最新 Fenix 数据刷新，而不是仅新增
+7. 未安装 pygeomag 时磁方位会退化为"约等于真方位"的旧行为，建议安装
+   pygeomag 以获得准确的磁方位数据
+8. 如有问题请查看 GitHub Issues
 
 
 九、参考项目

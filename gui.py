@@ -199,12 +199,21 @@ class ConversionGUI:
         fenix = results.get('fenix_db')
         csv_path = results.get('fenix_csv')
         ini_results = results.get('ini_s3db', {})
+        naip = results.get('naip_completeness')
 
         # Build detection summary
         lines = []
         lines.append("检测结果:")
         if fenix:
             lines.append(f"  [OK] Fenix nd.db3: {fenix}")
+            if naip:
+                if naip.get('error'):
+                    lines.append(f"  [!!] 无法校验 NAIP 完整性: {naip['error']}")
+                elif naip['is_complete']:
+                    lines.append(f"  [OK] NAIP 完整性校验通过: {naip['cn_airports_with_procs']} 个中国机场含进离场程序")
+                else:
+                    lines.append(f"  [警告] 检测到的 Fenix 数据可能不含完整 NAIP 中国程序数据！")
+                    lines.append(f"         仅 {naip['cn_airports_with_procs']} 个中国机场含进离场程序，转换后中国机场程序会很少")
         else:
             lines.append(f"  [--] Fenix nd.db3: 未找到")
 
@@ -237,6 +246,9 @@ class ConversionGUI:
 
         # Build summary for dialog
         summary = f"Fenix: {fenix or '未找到'}\nCSV: {csv_path or '未找到'}\niniBuilds: {selected_label or '未找到'}"
+        if naip and not naip.get('error') and not naip['is_complete']:
+            summary += (f"\n\n警告：检测到的 Fenix 数据仅 {naip['cn_airports_with_procs']} 个中国机场含进离场程序，"
+                        f"可能不是含 NAIP 数据的完整版，转换后中国机场程序会很少。")
 
         self.log(msg + '\n')
 

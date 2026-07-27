@@ -8,6 +8,13 @@ MSFS2020 and MSFS2024 installations.
 import os
 import glob
 import sys
+import sqlite3
+
+
+# 判定"完整 NAIP 中国程序数据"的最小机场数阈值。
+# 普通 Navigraph 订阅版 Fenix 数据仅约 92 个中国机场且几乎没有 SID/STAR/IAP，
+# 而含 NAIP 数据的完整版约有 280 个中国机场含程序。
+NAIP_COMPLETENESS_THRESHOLD = 100
 
 
 def get_appdata() -> str:
@@ -127,6 +134,46 @@ def detect_inibuilds_s3db() -> dict[str, str]:
     return results
 
 
+def check_naip_completeness(fenix_db_path: str) -> dict:
+    """
+    检查 Fenix nd.db3 是否包含完整的 NAIP 中国程序数据。
+
+    普通 Navigraph 订阅版本仅有约 92 个中国机场，且几乎没有 SID/STAR/IAP
+    进离场程序；只有集成了 NAIP 数据的版本才有约 280 个中国机场含完整程序。
+
+    Args:
+        fenix_db_path: Fenix nd.db3 文件路径
+
+    Returns:
+        {
+            'is_complete': bool,        # 是否判定为完整版
+            'cn_airports_with_procs': int,  # 含程序的中国机场数
+            'error': str | None,        # 检测出错时的错误信息
+        }
+    """
+    result = {
+        'is_complete': False,
+        'cn_airports_with_procs': 0,
+        'error': None,
+    }
+    try:
+        uri = f"file:{fenix_db_path}?immutable=1"
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(DISTINCT AirportID) FROM Terminals "
+                "WHERE ICAO LIKE 'Z%'"
+            ).fetchone()[0]
+            result['cn_airports_with_procs'] = count
+            result['is_complete'] = count >= NAIP_COMPLETENESS_THRESHOLD
+        finally:
+            conn.close()
+    except Exception as e:
+        result['error'] = str(e)
+
+    return result
+
+
 def detect_all() -> dict:
     """
     Run all auto-detection and return results.
@@ -136,12 +183,19 @@ def detect_all() -> dict:
             'fenix_db': str or None,
             'fenix_csv': str or None,
             'ini_s3db': dict,  # {sim_label: path}
+            'naip_completeness': dict or None,  # 完整性校验结果（仅当检测到 fenix_db 时）
         }
     """
+    fenix_db = detect_fenix_db()
+    naip_completeness = None
+    if fenix_db:
+        naip_completeness = check_naip_completeness(fenix_db)
+
     return {
-        'fenix_db': detect_fenix_db(),
+        'fenix_db': fenix_db,
         'fenix_csv': detect_fenix_csv(),
         'ini_s3db': detect_inibuilds_s3db(),
+        'naip_completeness': naip_completeness,
     }
 
 
@@ -155,6 +209,18 @@ def print_detection_report(results: dict):
     fenix = results.get('fenix_db')
     if fenix:
         print(f"  [OK] Fenix nd.db3: {fenix}")
+
+        naip = results.get('naip_completeness')
+        if naip:
+            if naip.get('error'):
+                print(f"  [!!] 无法校验 NAIP 完整性: {naip['error']}")
+            elif naip['is_complete']:
+                print(f"  [OK] NAIP 完整性校验通过: {naip['cn_airports_with_procs']} 个中国机场含进离场程序")
+            else:
+                print(f"  [警告] 检测到的 Fenix 数据可能不含完整 NAIP 中国程序数据！")
+                print(f"         仅 {naip['cn_airports_with_procs']} 个中国机场含进离场程序"
+                      f"（完整版通常 >= {NAIP_COMPLETENESS_THRESHOLD} 个）")
+                print(f"         这可能是普通 Navigraph 订阅版本，转换后中国机场程序会很少")
     else:
         print(f"  [--] Fenix nd.db3: 未找到")
 

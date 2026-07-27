@@ -9,7 +9,8 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 import sqlite3
-from freq import decode_freq  # type: ignore[import-untyped]
+from freq import decode_freq, is_valid_frequency  # type: ignore[import-untyped]
+from geomag import get_magnetic_declination, apply_magnetic_variation  # type: ignore[import-untyped]
 
 
 TBL_PI_COLUMNS = [
@@ -39,6 +40,11 @@ def convert_localizers(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
     """
     Convert ILS localizers for Chinese airports.
 
+    Uses UPSERT: existing localizers are refreshed with the latest Fenix
+    data, new localizers are inserted. Frequencies outside the valid ILS
+    band (108-112 MHz) are rejected instead of written with bogus data.
+    Magnetic bearing is computed via WMM instead of using true bearing.
+
     Args:
         airport_lookup: Dict mapping AirportID → ICAO
         runway_lookup: Dict mapping RunwayID → {icao, ident, true_heading, ...}
@@ -52,7 +58,7 @@ def convert_localizers(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         FROM ILSes
     """).fetchall()
 
-    # Get existing localizers for dedup
+    # Get existing localizers (for new vs. updated reporting)
     existing = set()
     for row in dst_conn.execute(
         "SELECT airport_identifier, llz_identifier, runway_identifier "
@@ -61,8 +67,10 @@ def convert_localizers(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         existing.add((row['airport_identifier'], row['llz_identifier'],
                       row['runway_identifier']))
 
-    new_rows = []
-    skipped = 0
+    upsert_rows = []
+    new_count = 0
+    updated_count = 0
+    freq_rejected = 0
 
     for ils in fenix_ils:
         rwy_id = ils['RunwayID']
@@ -78,13 +86,19 @@ def convert_localizers(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         if not llz_ident:
             continue
 
-        dedup_key = (icao, llz_ident, rwy_ident)
-        if dedup_key in existing:
-            skipped += 1
-            continue
-
         # Decode frequency
         freq = decode_freq(ils['Freq'], None)  # ILS is VHF
+
+        # Reject implausible ILS frequencies instead of writing bogus data
+        if not is_valid_frequency(freq, '8'):
+            freq_rejected += 1
+            continue
+
+        dedup_key = (icao, llz_ident, rwy_ident)
+        if dedup_key in existing:
+            updated_count += 1
+        else:
+            new_count += 1
 
         # Glideslope is typically co-located with localizer
         # (but at the touchdown zone, not runway end)
@@ -94,9 +108,19 @@ def convert_localizers(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         area_code = 'EEU'
         icao_code = icao[:2]
 
-        # Magnetic variation not available from Fenix ILS directly
-        # Use 0 for station declination as default
-        mag_var = 0.0
+        # Fenix's ILSes.LocCourse is already the MAGNETIC bearing (verified
+        # against runway TrueHeading: the delta matches the local WMM
+        # declination, e.g. ~-7.9° at ZBAA). So llz_bearing = LocCourse
+        # directly, and llz_truebearing is derived by REMOVING the
+        # declination (true = magnetic + declination).
+        loc_course_mag = ils['LocCourse'] or 0.0
+        mag_var = get_magnetic_declination(ils['Latitude'] or 0.0, ils['Longtitude'] or 0.0)
+        if mag_var is None:
+            mag_var = 0.0
+            loc_course_true = loc_course_mag  # Fallback: mag ≈ true when WMM unavailable
+        else:
+            # true = magnetic + declination (inverse of apply_magnetic_variation)
+            loc_course_true = apply_magnetic_variation(loc_course_mag, -mag_var)
 
         row_data = (
             icao,                    # airport_identifier
@@ -107,22 +131,25 @@ def convert_localizers(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
             gs_lon,                  # gs_longitude
             icao_code,               # icao_code
             ils['Category'] or '1',  # ils_mls_gls_category
-            ils['LocCourse'] or 0.0, # llz_bearing (magnetic)
+            loc_course_mag,          # llz_bearing (magnetic, direct from Fenix)
             freq,                    # llz_frequency (MHz)
             llz_ident,               # llz_identifier
             ils['Latitude'] or 0.0,  # llz_latitude
             ils['Longtitude'] or 0.0,# llz_longitude
-            (ils['LocCourse'] or 0.0) - mag_var,  # llz_truebearing
+            loc_course_true,         # llz_truebearing (derived via WMM)
             5.0,                     # llz_width (standard ILS width)
             rwy_ident,               # runway_identifier
-            0.0,                     # station_declination
+            mag_var,                 # station_declination
         )
-        new_rows.append(row_data)
+        upsert_rows.append(row_data)
 
     print(f"  Fenix total ILSes: {len(fenix_ils)}")
-    print(f"  Chinese ILSes to insert: {len(new_rows)}, skipped: {skipped}")
+    print(f"  频率越界被拒绝: {freq_rejected}")
+    print(f"  新增 ILS: {new_count}")
+    print(f"  更新 ILS: {updated_count}")
 
-    from db_utils import batch_insert  # type: ignore[import-untyped]
-    batch_insert(dst_conn, 'tbl_pi_localizers_glideslopes', TBL_PI_COLUMNS, new_rows)
+    from db_utils import batch_upsert  # type: ignore[import-untyped]
+    total = batch_upsert(dst_conn, 'tbl_pi_localizers_glideslopes', TBL_PI_COLUMNS, upsert_rows,
+                         conflict_columns=['airport_identifier', 'llz_identifier', 'runway_identifier'])
 
-    return len(new_rows)
+    return total
