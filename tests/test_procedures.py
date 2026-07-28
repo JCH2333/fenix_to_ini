@@ -38,7 +38,12 @@ class ProcedureConversionTests(unittest.TestCase):
         )
         create_table(self.dst, "tbl_pd_sids", TBL_PD_COLUMNS)
         create_table(self.dst, "tbl_pe_stars", TBL_PD_COLUMNS)
-        create_table(self.dst, "tbl_pf_iaps", TBL_PF_COLUMNS)
+        # MSFS 2024 iniBuilds A340 omits the optional ctl column.
+        create_table(
+            self.dst,
+            "tbl_pf_iaps",
+            [column for column in TBL_PF_COLUMNS if column != "ctl"],
+        )
 
         foreign = {column: None for column in TBL_PD_COLUMNS}
         foreign.update(

@@ -50,7 +50,7 @@ def verify_all(db_path: str, source_path: str | None = None) -> bool:
 
 
 def check_row_counts(conn) -> bool:
-    """Verify row counts are reasonable."""
+    """Verify required tables contain data and report template-size hints."""
     print("\n--- Row Count Check ---")
     ok = True
 
@@ -68,11 +68,17 @@ def check_row_counts(conn) -> bool:
     for table, min_rows, max_rows, label in checks:
         try:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            in_range = min_rows <= count <= max_rows
-            status = "[OK]" if in_range else "[FAIL]"
-            if not in_range:
+            if count == 0:
+                status = "[FAIL]"
                 ok = False
-            print(f"  {status} {label}: {count} rows (expected {min_rows}-{max_rows})")
+            elif min_rows <= count <= max_rows:
+                status = "[OK]"
+            else:
+                # iniBuilds ships different baseline datasets per aircraft and
+                # simulator build. Source-completeness checks provide the hard
+                # signal; these historical totals are only useful as a hint.
+                status = "[WARN]"
+            print(f"  {status} {label}: {count} rows (reference {min_rows}-{max_rows})")
         except Exception as e:
             print(f"  [FAIL] {label}: ERROR - {e}")
             ok = False

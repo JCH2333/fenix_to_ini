@@ -216,7 +216,24 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
     if star_rows:
         batch_insert(dst_conn, 'tbl_pe_stars', TBL_PD_COLUMNS, star_rows)
     if iap_rows:
-        batch_insert(dst_conn, 'tbl_pf_iaps', TBL_PF_COLUMNS, iap_rows)
+        target_columns = {
+            row[1] for row in dst_conn.execute("PRAGMA table_info(tbl_pf_iaps)")
+        }
+        missing_core = [column for column in TBL_PD_COLUMNS
+                        if column not in target_columns]
+        if missing_core:
+            raise sqlite3.OperationalError(
+                "tbl_pf_iaps is missing required columns: "
+                + ", ".join(missing_core)
+            )
+        iap_columns = [column for column in TBL_PF_COLUMNS
+                       if column in target_columns]
+        column_indexes = [TBL_PF_COLUMNS.index(column) for column in iap_columns]
+        projected_rows = [
+            tuple(row[index] for index in column_indexes)
+            for row in iap_rows
+        ]
+        batch_insert(dst_conn, 'tbl_pf_iaps', iap_columns, projected_rows)
 
     print(f"  新增 SID: {stats['sid']}")
     print(f"  新增 STAR: {stats['star']}")
