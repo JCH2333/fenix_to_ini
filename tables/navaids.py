@@ -272,11 +272,15 @@ def convert_navaids(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
     print(f"  VHF 导航台: 新增 {vhf_new}, 更新 {vhf_updated}")
     print(f"  NDB 导航台: 新增 {ndb_new}, 更新 {ndb_updated}")
 
-    from db_utils import batch_upsert  # type: ignore[import-untyped]
-    batch_upsert(dst_conn, 'tbl_d_vhfnavaids', TBL_D_COLUMNS, vhf_rows,
-                conflict_columns=['navaid_identifier', 'icao_code'])
-    batch_upsert(dst_conn, 'tbl_db_enroute_ndbnavaids', TBL_DB_COLUMNS, ndb_rows,
-                conflict_columns=['navaid_identifier', 'icao_code'])
+    from db_utils import batch_merge_by_coordinates  # type: ignore[import-untyped]
+    batch_merge_by_coordinates(
+        dst_conn, 'tbl_d_vhfnavaids', TBL_D_COLUMNS, vhf_rows,
+        'navaid_identifier', 'navaid_latitude', 'navaid_longitude',
+    )
+    batch_merge_by_coordinates(
+        dst_conn, 'tbl_db_enroute_ndbnavaids', TBL_DB_COLUMNS, ndb_rows,
+        'navaid_identifier', 'navaid_latitude', 'navaid_longitude',
+    )
 
     # Build navaid lookup: NavaidID → {ident, lat, lon, type}
     navaid_lookup = {}

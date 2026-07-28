@@ -81,50 +81,22 @@ def batch_insert(conn: sqlite3.Connection, table: str, columns: list[str],
     return total
 
 
-def ensure_unique_index(conn: sqlite3.Connection, table: str, columns: list[str]):
-    """
-    Ensure a unique index exists on the given columns for a table.
-
-    SQLite's `ON CONFLICT` clause requires a UNIQUE constraint or index on
-    the conflict columns. The iniBuilds db.s3db schema does not declare
-    PRIMARY KEY/UNIQUE constraints on most tables, so we create a
-    dedicated unique index (idempotent, safe to call every run) before
-    attempting an UPSERT. This index only affects query planning /
-    constraint enforcement — it does not change how iniBuilds reads the
-    table's columns.
-
-    Some existing db.s3db data (e.g. from earlier stock/Navigraph
-    imports) may already contain duplicate rows on the intended conflict
-    columns. If index creation fails because of that, we deduplicate
-    (keep the first occurrence, drop the rest by rowid) and retry once.
-    """
-    index_name = f"idx_upsert_{table}_{'_'.join(columns)}"
-    col_list = ','.join(columns)
-    try:
-        conn.execute(
-            f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table} ({col_list})"
-        )
-    except sqlite3.IntegrityError:
-        print(f"  [{table}] 发现基于 ({col_list}) 的重复历史记录，正在自动去重...")
-        conn.execute(f"""
-            DELETE FROM {table}
-            WHERE rowid NOT IN (
-                SELECT MIN(rowid) FROM {table} GROUP BY {col_list}
-            )
-        """)
-        conn.execute(
-            f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table} ({col_list})"
-        )
+def _drop_legacy_upsert_indexes(conn: sqlite3.Connection, table: str):
+    """Remove unique indexes created by converter versions before v1.2."""
+    indexes = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='index' AND tbl_name=? AND name LIKE 'idx_upsert_%'",
+        (table,),
+    ).fetchall()
+    for row in indexes:
+        name = row[0].replace('"', '""')
+        conn.execute(f'DROP INDEX "{name}"')
 
 
 def batch_upsert(conn: sqlite3.Connection, table: str, columns: list[str],
                  rows: list[tuple], conflict_columns: list[str], batch_size: int = 5000):
     """
-    Batch UPSERT (INSERT OR UPDATE) rows into a table with transaction management.
-
-    Automatically ensures a unique index exists on conflict_columns, since
-    SQLite requires one for the ON CONFLICT clause to work and the
-    iniBuilds schema does not declare such constraints natively.
+    Merge rows without adding constraints or deleting existing duplicates.
 
     Args:
         conn: Target database connection
@@ -141,30 +113,113 @@ def batch_upsert(conn: sqlite3.Connection, table: str, columns: list[str],
         print(f"  [{table}] 0 rows to upsert (empty)")
         return 0
 
-    ensure_unique_index(conn, table, conflict_columns)
+    _drop_legacy_upsert_indexes(conn, table)
 
-    placeholders = ','.join(['?' for _ in columns])
+    key_indexes = [columns.index(column) for column in conflict_columns]
+    key_sql = ','.join(conflict_columns)
+    existing = {}
+    for record in conn.execute(f"SELECT rowid, {key_sql} FROM {table}"):
+        key = tuple(record[index + 1] for index in range(len(conflict_columns)))
+        existing.setdefault(key, []).append(record[0])
+
+    updates = []
+    inserts = []
+    for row in rows:
+        key = tuple(row[index] for index in key_indexes)
+        candidates = existing.get(key)
+        if candidates:
+            updates.append(tuple(row) + (candidates.pop(0),))
+        else:
+            inserts.append(row)
+
+    assignments = ','.join(f'{column}=?' for column in columns)
+    placeholders = ','.join('?' for _ in columns)
     col_names = ','.join(columns)
-    conflict_keys = ','.join(conflict_columns)
+    with conn:
+        conn.executemany(
+            f"UPDATE {table} SET {assignments} WHERE rowid=?",
+            updates,
+        )
+        conn.executemany(
+            f"INSERT INTO {table} ({col_names}) VALUES ({placeholders})",
+            inserts,
+        )
 
-    # Build UPDATE SET clause (all columns except conflict keys)
-    update_columns = [col for col in columns if col not in conflict_columns]
-    update_set = ','.join([f"{col}=excluded.{col}" for col in update_columns])
+    print(f"  [{table}] merged {len(rows)} rows "
+          f"(updated {len(updates)}, inserted {len(inserts)})")
+    return len(rows)
 
-    sql = f"""
-        INSERT INTO {table} ({col_names}) VALUES ({placeholders})
-        ON CONFLICT({conflict_keys}) DO UPDATE SET {update_set}
-    """
 
-    total = 0
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i + batch_size]
-        with conn:
-            conn.executemany(sql, batch)
-        total += len(batch)
+def batch_merge_by_coordinates(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: list[str],
+    rows: list[tuple],
+    identifier_column: str,
+    latitude_column: str,
+    longitude_column: str,
+    tolerance: float = 0.001,
+):
+    """Merge navigation points by identifier and nearby coordinates."""
+    if not rows:
+        print(f"  [{table}] 0 rows to merge (empty)")
+        return 0
 
-    print(f"  [{table}] upserted {total} rows")
-    return total
+    _drop_legacy_upsert_indexes(conn, table)
+    ident_index = columns.index(identifier_column)
+    lat_index = columns.index(latitude_column)
+    lon_index = columns.index(longitude_column)
+
+    existing = {}
+    query = (
+        f"SELECT rowid, {identifier_column}, {latitude_column}, {longitude_column} "
+        f"FROM {table}"
+    )
+    for rowid, ident, lat, lon in conn.execute(query):
+        if ident and lat is not None and lon is not None:
+            existing.setdefault(str(ident).strip(), []).append((rowid, lat, lon))
+
+    used_rowids = set()
+    updates = []
+    inserts = []
+    max_distance_sq = tolerance * tolerance
+    for row in rows:
+        ident = str(row[ident_index] or '').strip()
+        lat = row[lat_index]
+        lon = row[lon_index]
+        best = None
+        if ident and lat is not None and lon is not None:
+            for candidate in existing.get(ident, []):
+                rowid, old_lat, old_lon = candidate
+                if rowid in used_rowids:
+                    continue
+                distance_sq = (lat - old_lat) ** 2 + (lon - old_lon) ** 2
+                if distance_sq <= max_distance_sq and (
+                    best is None or distance_sq < best[0]
+                ):
+                    best = (distance_sq, rowid)
+        if best is None:
+            inserts.append(row)
+        else:
+            used_rowids.add(best[1])
+            updates.append(tuple(row) + (best[1],))
+
+    assignments = ','.join(f'{column}=?' for column in columns)
+    placeholders = ','.join('?' for _ in columns)
+    col_names = ','.join(columns)
+    with conn:
+        conn.executemany(
+            f"UPDATE {table} SET {assignments} WHERE rowid=?",
+            updates,
+        )
+        conn.executemany(
+            f"INSERT INTO {table} ({col_names}) VALUES ({placeholders})",
+            inserts,
+        )
+
+    print(f"  [{table}] merged {len(rows)} rows "
+          f"(updated {len(updates)}, inserted {len(inserts)})")
+    return len(rows)
 
 
 def get_existing_ids(conn: sqlite3.Connection, table: str,

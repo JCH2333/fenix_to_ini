@@ -159,6 +159,7 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
             'lat': w['Latitude'] or 0.0,
             'lon': w['Longtitude'] or 0.0,
             'name': w['Name'] or '',
+            'navaid_id': w['NavaidID'],
         }
 
     # Chinese airport coordinates for nearest-airport fallback
@@ -267,13 +268,17 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
                 wpt_type,         # waypoint_type
             ))
 
-    from db_utils import batch_upsert  # type: ignore[import-untyped]
+    from db_utils import batch_merge_by_coordinates  # type: ignore[import-untyped]
     print(f"  航路点: 新增 {ea_new}, 更新 {ea_updated}")
-    batch_upsert(dst_conn, 'tbl_ea_enroute_waypoints', TBL_EA_COLUMNS, ea_rows,
-                conflict_columns=['waypoint_identifier', 'icao_code'])
+    batch_merge_by_coordinates(
+        dst_conn, 'tbl_ea_enroute_waypoints', TBL_EA_COLUMNS, ea_rows,
+        'waypoint_identifier', 'waypoint_latitude', 'waypoint_longitude',
+    )
 
     print(f"  终端航路点: 新增 {pc_new}, 更新 {pc_updated}")
-    batch_upsert(dst_conn, 'tbl_pc_terminal_waypoints', TBL_PC_COLUMNS, pc_rows,
-                conflict_columns=['waypoint_identifier', 'region_code'])
+    batch_merge_by_coordinates(
+        dst_conn, 'tbl_pc_terminal_waypoints', TBL_PC_COLUMNS, pc_rows,
+        'waypoint_identifier', 'waypoint_latitude', 'waypoint_longitude',
+    )
 
     return waypoint_lookup, terminal_wpt_ids

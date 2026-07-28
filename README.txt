@@ -1,6 +1,7 @@
 ===============================================================================
   Fenix -> iniBuilds 导航数据转换工具
   中国区域数据补充 (NAIP)
+  版本: v1.2.0
   https://github.com/JCH2333/fenix_to_ini
 ===============================================================================
 
@@ -30,6 +31,13 @@ DFDv2 格式 (db.s3db)，补充到 MSFS2020/2024 的 iniBuilds 机模中。
       跑道、导航台、航路、进离场程序数据补充到 iniBuilds 数据库中。
 
 转换后的导航数据周期与源 Fenix 数据保持一致。
+
+v1.2.0 更新简介:
+- 修复 SID/STAR/IAP 的程序类型与路径终止码字段颠倒问题。
+- 按 Fenix 源库完整重建中国程序，保留进近过渡、最终进近和复飞段。
+- 使用坐标匹配更新导航台和航路点，不再删除合法同名记录或创建唯一索引。
+- 修复 --output 未生效、--dry-run 会修改目标库、进度总数错误等问题。
+- 验证器支持与 Fenix 源库逐段对照，并在失败时返回错误状态。
 
 
 二、系统要求
@@ -77,6 +85,7 @@ python main.py [选项]
 选项:
   --src PATH           Fenix nd.db3 路径
   --dst PATH           iniBuilds db.s3db 路径
+  --output PATH        以 --dst 为模板生成新的输出文件
   --csv PATH           RTE_SEG.csv 路径 (可选)
   --overwrite          覆盖目标文件 (自动备份)
   --auto-detect        自动检测路径
@@ -92,11 +101,14 @@ python main.py [选项]
   # 手动指定路径
   python main.py --src ../nd.db3 --dst ../db.s3db --csv ../RTE_SEG.csv --overwrite
 
+  # 保留模板库并生成新的输出文件
+  python main.py --src ../nd.db3 --dst ../db.s3db --output ./output/db.s3db
+
   # 仅分析不修改
   python main.py --dry-run
 
   # 转换后验证
-  python verify.py <path_to_db.s3db>
+  python verify.py <path_to_db.s3db> --source <path_to_nd.db3>
 
 
 五、文件说明
@@ -107,7 +119,7 @@ gui.py           - 图形界面 (tkinter)
 auto_detect.py   - 自动检测导航数据路径 + NAIP 完整性校验
 freq.py          - 频率编解码 + 合法频段校验
 mappings.py      - 常量映射
-db_utils.py      - SQLite 工具 (含 UPSERT 覆盖更新)
+db_utils.py      - SQLite 工具 (非破坏性更新与坐标匹配)
 merge.py         - 数据统计
 region_lookup.py - 2607 CSV FIR 区域码交叉参考
 geomag.py        - WMM 磁偏角计算 (基于 pygeomag)

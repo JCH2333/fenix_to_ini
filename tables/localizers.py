@@ -71,6 +71,7 @@ def convert_localizers(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
     new_count = 0
     updated_count = 0
     freq_rejected = 0
+    covered_airports = set()
 
     for ils in fenix_ils:
         rwy_id = ils['RunwayID']
@@ -80,6 +81,7 @@ def convert_localizers(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
             continue  # Not a Chinese runway
 
         icao = rwy['icao']
+        covered_airports.add(icao)
         rwy_ident = rwy['ident']
         llz_ident = (ils['Ident'] or '').strip()
 
@@ -149,6 +151,15 @@ def convert_localizers(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
     print(f"  更新 ILS: {updated_count}")
 
     from db_utils import batch_upsert  # type: ignore[import-untyped]
+    airport_icaos = sorted(covered_airports)
+    if airport_icaos:
+        placeholders = ','.join('?' for _ in airport_icaos)
+        dst_conn.execute(
+            f"DELETE FROM tbl_pi_localizers_glideslopes "
+            f"WHERE airport_identifier IN ({placeholders})",
+            airport_icaos,
+        )
+        dst_conn.commit()
     total = batch_upsert(dst_conn, 'tbl_pi_localizers_glideslopes', TBL_PI_COLUMNS, upsert_rows,
                          conflict_columns=['airport_identifier', 'llz_identifier', 'runway_identifier'])
 

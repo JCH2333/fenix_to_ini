@@ -3,7 +3,7 @@ Phase 7: Convert Fenix Terminals + TerminalLegs → iniBuilds procedure tables.
 
 This is the most complex conversion:
 - Splits by Proc type: 1=STAR, 2=SID, 3=IAP
-- Expands ALL transitions to each runway
+- Preserves independent transition, common, final, and missed-approach sections
 - Resolves waypoint IDs to coordinates
 - Parses altitude constraints
 - Handles path terminators, course, distance, speed limits
@@ -152,14 +152,12 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
     for leg in cn_legs:
         legs_by_terminal[leg['TerminalID']].append(leg)
 
-    # Get existing procedures for dedup
-    existing = _load_existing_procedures(dst_conn)
-
     # Convert each terminal
     sid_rows = []
     star_rows = []
     iap_rows = []
-    stats = {'sid': 0, 'star': 0, 'iap': 0, 'skipped': 0}
+    stats = {'sid': 0, 'star': 0, 'iap': 0}
+    covered_airports = defaultdict(set)
 
     for terminal in cn_terminals:
         proc = str(terminal['Proc'])
@@ -172,55 +170,29 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
             continue
 
         icao = airport_lookup.get(terminal['AirportID'], terminal['ICAO'] or '')
+        covered_airports[table_name].add(icao)
         proc_ident = (terminal['Name'] or '').strip()[:6]
         rwy = normalize_runway(terminal['Rwy'] or '')
 
-        # Find all unique transitions for this procedure. Runway-specific
-        # legs are already represented as transitions named "RWxx" (see
-        # _collect_transitions_and_runways), so there is no separate
-        # "runway" dimension to loop over — the destination tables
-        # (tbl_pd_sids/tbl_pe_stars/tbl_pf_iaps) have no runway_identifier
-        # column at all, so looping transitions × runways previously
-        # produced byte-for-byte duplicate rows for every runway sharing
-        # the same 'ALL' legs.
-        transitions, _ = _collect_transitions_and_runways(legs, terminal, rwy)
+        # Each (route type, transition) pair is an independent DFD section.
+        sections = defaultdict(list)
+        for leg in legs:
+            transition = normalize_transition(leg['Transition'], rwy)
+            route_type = derive_route_type(proc, leg['Type'], transition, proc_ident)
+            sections[(route_type, transition)].append(leg)
 
-        for transition in transitions:
-            # Get legs for this transition: transition-specific legs plus
-            # any legs common to all transitions ('ALL')
-            trans_legs = [l for l in legs
-                          if l['Transition'] == transition or
-                          l['Transition'] == 'ALL']
-
-            if not trans_legs:
-                continue
-
-            # Sort legs by their order in the procedure
-            trans_legs.sort(key=lambda l: l['ID'])
+        for (route_type, transition), section_legs in sections.items():
+            section_legs.sort(key=lambda leg: leg['ID'])
 
             # Generate seqno
-            for i, leg in enumerate(trans_legs):
+            for i, leg in enumerate(section_legs):
                 seqno = (i + 1) * 10
 
                 row = _build_procedure_row(
-                    leg, icao, proc_ident, transition, rwy,
+                    leg, icao, proc_ident, transition, rwy, route_type,
                     seqno, waypoint_lookup, navaid_lookup,
                     legs_ex.get(leg['ID'])
                 )
-
-                if row is None:
-                    continue
-
-                # Dedup check (matches the destination table's actual
-                # columns — there is no runway_identifier column)
-                dedup_key = (
-                    icao, proc_ident, transition or '',
-                    seqno, row[15]  # path_termination
-                )
-                if dedup_key in existing.get(table_name, set()):
-                    stats['skipped'] += 1
-                    continue
-                existing.setdefault(table_name, set()).add(dedup_key)
 
                 if table_name == 'tbl_pd_sids':
                     sid_rows.append(row)
@@ -233,6 +205,8 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                     iap_extra = (None, None, None, None, None, None)
                     iap_rows.append(row + iap_extra)
                     stats['iap'] += 1
+
+    replaced = _delete_airport_procedures(dst_conn, covered_airports)
 
     # Insert into target tables
     from db_utils import batch_insert  # type: ignore[import-untyped]
@@ -247,40 +221,56 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
     print(f"  新增 SID: {stats['sid']}")
     print(f"  新增 STAR: {stats['star']}")
     print(f"  新增 IAP: {stats['iap']}")
-    print(f"  已存在跳过: {stats['skipped']}")
+    print(f"  已替换中国程序记录: {sum(replaced.values())}")
 
 
-def _collect_transitions_and_runways(legs: list, terminal, default_rwy: str) -> tuple[set, set]:
-    """Collect unique transitions and runways from leg data."""
-    transitions = set()
-    runways = set()
+def normalize_transition(transition: str | None, runway: str) -> str | None:
+    """Convert Fenix transition values to DFDv2 identifiers."""
+    value = (transition or '').strip()
+    if not value:
+        return None
+    if value == 'ALL':
+        return normalize_runway(runway) if runway else None
+    return value
 
-    for leg in legs:
-        trans = (leg['Transition'] or '').strip()
-        if trans and trans != 'ALL':
-            transitions.add(trans)
 
-            # Check if transition is a runway reference
-            if trans.upper().startswith('RW'):
-                runways.add(trans.upper())
-            elif len(trans) <= 3 and trans.isdigit():
-                runways.add(f"RW{trans.zfill(2)}")
+def derive_route_type(proc: str, fenix_type: str | None,
+                      transition: str | None, proc_ident: str) -> str:
+    """Map Fenix TerminalLegs.Type to the DFDv2 route_type."""
+    route_type = (fenix_type or '').strip()
+    if proc == '3' and route_type == '0':
+        if transition:
+            return 'A'
+        inferred = proc_ident[:1].upper()
+        return inferred if inferred in {'D', 'G', 'I', 'L', 'N', 'Q', 'R'} else '1'
+    return route_type or '1'
 
-    # If no specific transitions found, use ALL
-    if not transitions:
-        transitions = {'ALL'}
 
-    # If no runways found, use terminal's runway
-    if not runways and default_rwy:
-        runways = {default_rwy}
-
-    return transitions, runways
+def _delete_airport_procedures(dst_conn: sqlite3.Connection,
+                               airports_by_table: dict[str, set[str]]) -> dict[str, int]:
+    """Delete procedures only for airports that will be rebuilt."""
+    removed = {}
+    for table in ('tbl_pd_sids', 'tbl_pe_stars', 'tbl_pf_iaps'):
+        values = sorted(airports_by_table.get(table, set()))
+        if not values:
+            removed[table] = 0
+            continue
+        placeholders = ','.join('?' for _ in values)
+        before = dst_conn.total_changes
+        dst_conn.execute(
+            f"DELETE FROM {table} WHERE airport_identifier IN ({placeholders})",
+            values,
+        )
+        removed[table] = dst_conn.total_changes - before
+    dst_conn.commit()
+    return removed
 
 
 def _build_procedure_row(leg, icao: str, proc_ident: str,
-                         transition: str, runway: str, seqno: int,
+                         transition: str | None, runway: str, route_type: str,
+                         seqno: int,
                          waypoint_lookup: dict, navaid_lookup: dict,
-                         leg_ex: dict | None) -> tuple | None:
+                         leg_ex: dict | None) -> tuple:
     """Build a single procedure row from a TerminalLeg."""
 
     # Resolve waypoint
@@ -293,14 +283,16 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     if wpt_id and wpt_id > 0:
         wpt = waypoint_lookup.get(wpt_id)
         if wpt:
-            wpt_ident = wpt['ident']
+            navaid_id = wpt.get('navaid_id')
+            collocated_navaid = navaid_lookup.get(navaid_id) if navaid_id else None
+            wpt_ident = collocated_navaid['ident'] if collocated_navaid else wpt['ident']
             wpt_lat = wpt['lat'] if wpt_lat is None or wpt_lat == 0 else wpt_lat
             wpt_lon = wpt['lon'] if wpt_lon is None or wpt_lon == 0 else wpt_lon
-            wpt_ref_table = 'PC'
+            wpt_ref_table = 'D ' if collocated_navaid else 'PC'
 
-    if not wpt_ident and not (wpt_lat and wpt_lon):
-        # Skip legs without any waypoint reference
-        return None
+    if not wpt_ident and (leg['Alt'] or '').strip().upper() == 'MAP' and runway:
+        wpt_ident = normalize_runway(runway)
+        wpt_ref_table = 'PG'
 
     # Resolve recommended navaid
     nav_id = leg['NavID']
@@ -332,8 +324,11 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
             center_lon = wpt['lon'] if center_lon is None or center_lon == 0 else center_lon
             center_ref = 'PC'
 
-    # Path termination
-    path_term = map_path_terminator(leg['Type'] or 'IF')
+    # TrackCode is the ARINC path terminator. Type is the route section.
+    track_code = (leg['TrackCode'] or '').strip()
+    if track_code.startswith('RWY'):
+        track_code = 'TF'
+    path_term = map_path_terminator(track_code or 'IF')
 
     # Altitude
     alt1, alt2, alt_desc = parse_altitude(leg['Alt'])
@@ -360,9 +355,6 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
 
     # VNAV
     vnav = leg['Vnav'] if leg['Vnav'] and leg['Vnav'] != 0 else None
-
-    # Route type: 1=primary, 2=secondary, 3=alternate
-    route_type = '1'
 
     # Arc radius (for AF legs)
     arc_radius = leg['NavDist'] if path_term == 'AF' and leg['NavDist'] else None
@@ -409,7 +401,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
         speed_limit,                    # speed_limit
         None,                           # theta
         None,                           # transition_altitude
-        transition or None,             # transition_identifier
+        transition,                     # transition_identifier
         turn_dir,                       # turn_direction
         vnav,                           # vertical_angle
         leg['WptDescCode'] or None,     # waypoint_description_code
@@ -421,32 +413,3 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     )
 
     return row
-
-
-def _load_existing_procedures(dst_conn: sqlite3.Connection) -> dict:
-    """Load existing procedure identifiers for dedup.
-
-    Note: tbl_pd_sids/tbl_pe_stars/tbl_pf_iaps have no runway_identifier
-    column, so the dedup key only covers the columns that actually exist.
-    """
-    existing = {}
-    for table in ['tbl_pd_sids', 'tbl_pe_stars', 'tbl_pf_iaps']:
-        keys = set()
-        try:
-            rows = dst_conn.execute(f"""
-                SELECT airport_identifier, procedure_identifier,
-                       transition_identifier, seqno, path_termination
-                FROM {table}
-            """).fetchall()
-            for r in rows:
-                keys.add((
-                    r['airport_identifier'],
-                    r['procedure_identifier'],
-                    r['transition_identifier'] or '',
-                    r['seqno'],
-                    r['path_termination'],
-                ))
-        except sqlite3.OperationalError:
-            pass
-        existing[table] = keys
-    return existing

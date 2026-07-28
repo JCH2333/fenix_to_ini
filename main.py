@@ -152,17 +152,19 @@ def run_conversion(
     log("=" * 60)
     log(f"  Source:      {src_path}")
     log(f"  Destination: {dst_path}")
+    if output_path:
+        log(f"  Output:      {output_path}")
     if csv_path:
         log(f"  CSV:         {csv_path}")
     log(f"  Overwrite:   {overwrite_mode}")
     log("=" * 60)
 
     # Phase count depends on options
-    total_phases = 9  # base
+    total_phases = 9  # all phases except optional RTE and procedures
     if csv_path and not skip_rte:
         total_phases += 1  # 5b
     if not skip_procedures:
-        pass  # included in base count
+        total_phases += 1
     phase = 0
 
     def advance(label: str):
@@ -175,23 +177,38 @@ def run_conversion(
         log("-" * 40)
 
     # --- Setup destination ---
-    working_path = dst_path
-
-    if not dry_run and not no_backup:
-        # Create backup in backups/ folder
-        backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
-        os.makedirs(backup_dir, exist_ok=True)
-        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-        fname = os.path.basename(dst_path)
-        backup_path = os.path.join(backup_dir, f'{fname}.backup_{timestamp}')
-        log(f"Backup: {backup_path}")
-        shutil.copy2(dst_path, backup_path)
+    working_path = os.path.abspath(output_path) if output_path else dst_path
+    backup_path = None
+    dry_run_path = None
 
     if dry_run:
-        log("DRY RUN MODE - no changes will be written")
-        dst_conn = open_target(dst_path)
+        import tempfile
+        fd, dry_run_path = tempfile.mkstemp(
+            prefix='fenix_to_ini_dry_run_', suffix='.s3db',
+            dir=os.path.dirname(os.path.abspath(__file__)),
+        )
+        os.close(fd)
+        shutil.copy2(dst_path, dry_run_path)
+        working_path = dry_run_path
+        log("DRY RUN MODE - using a disposable database copy")
     else:
-        dst_conn = open_target(dst_path)
+        if os.path.abspath(working_path) != os.path.abspath(dst_path):
+            os.makedirs(os.path.dirname(working_path), exist_ok=True)
+
+        if not no_backup and os.path.exists(working_path):
+            # Back up the file that will actually be replaced.
+            backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
+            os.makedirs(backup_dir, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            fname = os.path.basename(working_path)
+            backup_path = os.path.join(backup_dir, f'{fname}.backup_{timestamp}')
+            log(f"Backup: {backup_path}")
+            shutil.copy2(working_path, backup_path)
+
+        if os.path.abspath(working_path) != os.path.abspath(dst_path):
+            shutil.copy2(dst_path, working_path)
+
+    dst_conn = open_target(working_path)
 
     src_conn = None
 
@@ -274,7 +291,7 @@ def run_conversion(
 
         # === Phase 9 ===
         advance("Phase 9: Empty Tables & Schema")
-        create_empty_tables(dst_conn, dst_path)
+        create_empty_tables(dst_conn, working_path)
 
         # --- Post-conversion ---
         report_changes(dst_conn, "AFTER")
@@ -285,7 +302,7 @@ def run_conversion(
             vacuum(dst_conn)
 
             # Write cycle.json to target directory
-            _write_cycle_json(dst_path, cycle_info)
+            _write_cycle_json(working_path, cycle_info)
 
         log()
         check_integrity(dst_conn)
@@ -303,7 +320,7 @@ def run_conversion(
         log(f"ERROR: {e}")
         import traceback
         traceback.print_exc()
-        if not dry_run and not no_backup:
+        if backup_path:
             log(f"Restore from backup at: {backup_path}")
         raise
 
@@ -312,6 +329,11 @@ def run_conversion(
             dst_conn.close()
         if src_conn:
             src_conn.close()
+        if dry_run_path:
+            for suffix in ('', '-wal', '-shm'):
+                path = dry_run_path + suffix
+                if os.path.exists(path):
+                    os.remove(path)
 
     log("Done.")
     return working_path

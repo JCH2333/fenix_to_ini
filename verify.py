@@ -20,7 +20,7 @@ CN_LAT_MIN, CN_LAT_MAX = 15.0, 55.0
 CN_LON_MIN, CN_LON_MAX = 70.0, 140.0
 
 
-def verify_all(db_path: str) -> bool:
+def verify_all(db_path: str, source_path: str | None = None) -> bool:
     """Run all verification checks. Returns True if all pass."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -35,6 +35,8 @@ def verify_all(db_path: str) -> bool:
     all_ok &= check_frequency_ranges(conn)
     all_ok &= check_coordinate_ranges(conn)
     all_ok &= check_referential_integrity(conn)
+    if source_path:
+        all_ok &= check_source_procedure_completeness(conn, source_path)
     all_ok &= spot_check_airport(conn, 'ZBAA', 'BEIJING')
     all_ok &= spot_check_airport(conn, 'ZSPD', 'PUDONG')
 
@@ -86,7 +88,9 @@ def check_frequency_ranges(conn) -> bool:
     # VHF navaids: 108.00 - 117.95 MHz
     bad_vhf = conn.execute("""
         SELECT COUNT(*) FROM tbl_d_vhfnavaids
-        WHERE navaid_frequency < 108.0 OR navaid_frequency > 118.0
+        WHERE navaid_latitude BETWEEN 15.0 AND 55.0
+          AND navaid_longitude BETWEEN 70.0 AND 140.0
+          AND (navaid_frequency < 108.0 OR navaid_frequency > 118.0)
     """).fetchone()[0]
     if bad_vhf > 0:
         print(f"  [FAIL] {bad_vhf} VHF navaids with out-of-range frequency")
@@ -97,7 +101,9 @@ def check_frequency_ranges(conn) -> bool:
     # NDB: 190 - 1750 KHz (but stored as-is in KHz)
     bad_ndb = conn.execute("""
         SELECT COUNT(*) FROM tbl_db_enroute_ndbnavaids
-        WHERE navaid_frequency < 100 OR navaid_frequency > 2000
+        WHERE navaid_latitude BETWEEN 15.0 AND 55.0
+          AND navaid_longitude BETWEEN 70.0 AND 140.0
+          AND (navaid_frequency < 100 OR navaid_frequency > 2000)
     """).fetchone()[0]
     if bad_ndb > 0:
         print(f"  [FAIL] {bad_ndb} NDB navaids with out-of-range frequency")
@@ -108,7 +114,10 @@ def check_frequency_ranges(conn) -> bool:
     # ILS: 108.00 - 111.95 MHz
     bad_ils = conn.execute("""
         SELECT COUNT(*) FROM tbl_pi_localizers_glideslopes
-        WHERE llz_frequency < 108.0 OR llz_frequency > 112.0
+        WHERE (airport_identifier IN ('OPGT', 'VHHX')
+               OR SUBSTR(airport_identifier, 1, 2) IN
+                  ('ZB','ZG','ZH','ZJ','ZL','ZP','ZS','ZU','ZW','ZY'))
+          AND (llz_frequency < 108.0 OR llz_frequency > 112.0)
     """).fetchone()[0]
     if bad_ils > 0:
         print(f"  [FAIL] {bad_ils} ILS with out-of-range frequency")
@@ -212,6 +221,69 @@ def check_referential_integrity(conn) -> bool:
     return ok
 
 
+def check_source_procedure_completeness(conn, source_path: str) -> bool:
+    """Compare converted Chinese procedure rows with the Fenix source."""
+    print("\n--- Fenix Procedure Completeness Check ---")
+    source = sqlite3.connect(f"file:{source_path}?immutable=1", uri=True)
+    source.row_factory = sqlite3.Row
+    ok = True
+    airport_filter = (
+        "a.ICAO IN ('OPGT','VHHX') OR SUBSTR(a.ICAO,1,2) IN "
+        "('ZB','ZG','ZH','ZJ','ZL','ZP','ZS','ZU','ZW','ZY')"
+    )
+    mappings = [
+        ('2', 'tbl_pd_sids', 'SIDs'),
+        ('1', 'tbl_pe_stars', 'STARs'),
+        ('3', 'tbl_pf_iaps', 'IAPs'),
+    ]
+    try:
+        for proc, table, label in mappings:
+            expected_rows, expected_airports = source.execute(
+                f"""
+                SELECT COUNT(*), COUNT(DISTINCT a.ICAO)
+                FROM TerminalLegs l
+                JOIN Terminals t ON t.ID=l.TerminalID
+                JOIN Airports a ON a.ID=t.AirportID
+                WHERE ({airport_filter}) AND CAST(t.Proc AS TEXT)=?
+                """,
+                (proc,),
+            ).fetchone()
+            source_airports = [
+                row[0] for row in source.execute(
+                    f"""
+                    SELECT DISTINCT a.ICAO
+                    FROM TerminalLegs l
+                    JOIN Terminals t ON t.ID=l.TerminalID
+                    JOIN Airports a ON a.ID=t.AirportID
+                    WHERE ({airport_filter}) AND CAST(t.Proc AS TEXT)=?
+                    """,
+                    (proc,),
+                )
+            ]
+            placeholders = ','.join('?' for _ in source_airports)
+            actual_rows, actual_airports = conn.execute(
+                f"""
+                SELECT COUNT(*), COUNT(DISTINCT airport_identifier)
+                FROM {table}
+                WHERE airport_identifier IN ({placeholders})
+                """,
+                source_airports,
+            ).fetchone()
+            matches = (
+                actual_rows == expected_rows
+                and actual_airports == expected_airports
+            )
+            status = "[OK]" if matches else "[FAIL]"
+            print(
+                f"  {status} {label}: rows {actual_rows}/{expected_rows}, "
+                f"airports {actual_airports}/{expected_airports}"
+            )
+            ok &= matches
+    finally:
+        source.close()
+    return ok
+
+
 def spot_check_airport(conn, icao: str, name_hint: str) -> bool:
     """Spot-check a known airport and its data."""
     print(f"\n--- Spot Check: {icao} ---")
@@ -279,5 +351,6 @@ if __name__ == '__main__':
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument('db_path', help='Path to db.s3db to verify')
+    p.add_argument('--source', help='Fenix nd.db3 used for conversion')
     args = p.parse_args()
-    verify_all(args.db_path)
+    sys.exit(0 if verify_all(args.db_path, args.source) else 1)

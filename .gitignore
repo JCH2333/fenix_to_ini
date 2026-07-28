@@ -13,6 +13,7 @@ __pycache__/
 # Runtime backups
 *.backup_*
 backups/
+diagnostics_tmp/
 
 # SQLite temporary files
 *.shm
