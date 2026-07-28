@@ -157,6 +157,30 @@ class ProcedureConversionTests(unittest.TestCase):
             ],
         )
 
+    def test_as346_iap_ctl_uses_official_default(self):
+        self.dst.execute("ALTER TABLE tbl_pf_iaps ADD COLUMN ctl")
+        self.src.execute(
+            "INSERT INTO Terminals VALUES (?,?,?,?,?,?,?,?,?)",
+            (20, 1, "3", "ZBAA", None, "I01-Y", "01", None, None),
+        )
+        self.src.execute(
+            "INSERT INTO TerminalLegs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (1, 20, "I", "", "CF", None, 40.05, 116.61, None,
+             None, None, None, None, None, None, None, "MAP", None,
+             None, None, None, "G  M"),
+        )
+
+        convert_procedures(
+            self.src, self.dst, {1: "ZBAA"}, {}, {}, {}
+        )
+
+        self.assertEqual(
+            self.dst.execute(
+                "SELECT ctl FROM tbl_pf_iaps WHERE airport_identifier='ZBAA'"
+            ).fetchone()[0],
+            "N",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

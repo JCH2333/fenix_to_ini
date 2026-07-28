@@ -202,7 +202,11 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                     stats['star'] += 1
                 elif table_name == 'tbl_pf_iaps':
                     # Add IAP-specific columns
-                    iap_extra = (None, None, None, None, None, None)
+                    # Aerosoft AS346 includes ctl and uses explicit N/Y values
+                    # for every row. Fenix has no equivalent field, so use the
+                    # official false/default value. A340 omits ctl and the
+                    # target-column projection below drops it automatically.
+                    iap_extra = ('N', None, None, None, None, None)
                     iap_rows.append(row + iap_extra)
                     stats['iap'] += 1
 

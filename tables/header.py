@@ -3,6 +3,7 @@ Phase 0: Generate tbl_hdr_header from Fenix config table.
 """
 
 import sqlite3
+import re
 from datetime import datetime, timezone
 
 
@@ -13,6 +14,16 @@ MONTH_MAP = {
     'MAY': '05', 'JUN': '06', 'JUL': '07', 'AUG': '08',
     'SEP': '09', 'OCT': '10', 'NOV': '11', 'DEC': '12',
 }
+
+
+def split_cycle_name(cycle_name: str) -> tuple[str, str, str]:
+    """Return DFDv2 cycle, JSON revision and three-digit header revision."""
+    match = re.fullmatch(r"(\d{4})(?:n(\d+))?", cycle_name.strip(), re.IGNORECASE)
+    if not match:
+        raise ValueError(f"Unsupported Fenix cycle name: {cycle_name}")
+    cycle = match.group(1)
+    revision_number = int(match.group(2) or "1")
+    return cycle, str(revision_number), f"{revision_number:03d}"
 
 
 def fenix_date_to_parts(date_str: str) -> tuple[str, str, str]:
@@ -41,8 +52,8 @@ def convert_header(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection):
     for row in src_conn.execute("SELECT key, val FROM config"):
         config[row['key']] = row['val']
 
-    # Use full cycle name (e.g. '2607n2'), not truncated
-    cycle = config.get('CycleName', '2607')
+    raw_cycle = config.get('CycleName', '2607')
+    cycle, revision, header_revision = split_cycle_name(raw_cycle)
 
     start_raw = config.get('CycleStartDate', '09JUL26')
     end_raw = config.get('CycleEndDate', '05AUG26')
@@ -52,7 +63,8 @@ def convert_header(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection):
     end_d, end_m, end_y = fenix_date_to_parts(end_raw)
     effective = f"{start_d}{start_m}{end_d}{end_m}{end_y}"  # e.g. '0907050826'
 
-    print(f"  Fenix cycle: {cycle} ({start_raw} - {end_raw})")
+    print(f"  Fenix cycle: {raw_cycle} -> DFDv2 {cycle} R{revision} "
+          f"({start_raw} - {end_raw})")
     print(f"  Navigraph effective_fromto: {effective}")
 
     now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')
@@ -63,8 +75,8 @@ def convert_header(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection):
         print(f"  [tbl_hdr_header] updating existing row with cycle {cycle}")
         dst_conn.execute("""
             UPDATE tbl_hdr_header
-            SET cycle = ?, effective_fromto = ?, parsed_at = ?
-        """, (cycle, effective, now_str))
+            SET cycle = ?, effective_fromto = ?, parsed_at = ?, revision = ?
+        """, (cycle, effective, now_str, header_revision))
     else:
         dst_conn.execute("""
             INSERT INTO tbl_hdr_header
@@ -79,7 +91,7 @@ def convert_header(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection):
             'NG_FWDFD',
             effective,
             now_str,
-            '001'
+            header_revision
         ))
         print(f"  [tbl_hdr_header] created with cycle {cycle}")
 
@@ -88,6 +100,7 @@ def convert_header(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection):
     # Return cycle info for cycle.json generation
     return {
         'cycle': cycle,
+        'revision': revision,
         'start_raw': start_raw,
         'end_raw': end_raw,
         'start_d': start_d,

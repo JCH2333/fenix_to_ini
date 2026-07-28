@@ -43,6 +43,7 @@ from tables.rest import (
 from tables.empty_tables import create_empty_tables
 from rte_seg import parse_rte_seg, resolve_coordinates, merge_rte_seg_to_airways
 from region_lookup import RegionLookup
+from deployment import find_package_layout, update_package_layout
 
 
 # Default log/print callback (can be overridden by GUI)
@@ -69,7 +70,7 @@ def _write_cycle_json(target_dir: str, cycle_info: dict):
 
     Format matches Navigraph DFDv2 cycle.json:
     {
-        "cycle": "2607n2",
+        "cycle": "2607",
         "revision": "2",
         "name": "iniBuilds DFD v2",
         "format": "dfdv2",
@@ -87,27 +88,49 @@ def _write_cycle_json(target_dir: str, cycle_info: dict):
     yy = cycle_info.get('start_y', '26')
     year = f"20{yy}" if len(yy) == 2 else yy
 
-    # Calculate revision: 'n2' suffix means revision 2
-    rev = '1'
-    if 'n' in cycle.lower():
-        idx = cycle.lower().index('n')
-        rev = cycle[idx + 1:].rstrip('n') or '1'
+    rev = str(cycle_info.get('revision', '1'))
+
+    json_path = os.path.join(os.path.dirname(target_dir), 'cycle.json')
+    existing = {}
+    if os.path.isfile(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                existing = json.load(f)
+        except (OSError, ValueError):
+            existing = {}
 
     cycle_json = {
         "cycle": cycle,
         "revision": rev,
-        "name": "iniBuilds DFD v2",
-        "format": "dfdv2",
-        "validityPeriod": f"{year}-{start_m}-{start_d}/{year}-{end_m}-{end_d}"
+        "name": existing.get("name", "iniBuilds DFD v2"),
+        "format": existing.get("format", "dfdv2"),
+        "validityPeriod": (
+            f"{year}-{start_m}-{start_d}/"
+            f"{('20' + cycle_info.get('end_y', yy)) if len(cycle_info.get('end_y', yy)) == 2 else cycle_info.get('end_y', yy)}-{end_m}-{end_d}"
+        )
     }
 
-    json_path = os.path.join(os.path.dirname(target_dir), 'cycle.json')
     try:
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(cycle_json, f, indent=2, ensure_ascii=False)
         log(f"Updated cycle.json: {json_path}")
+        return json_path
     except Exception as e:
         log(f"WARNING: Could not write cycle.json: {e}")
+        raise
+
+
+def _copy_target_cycle_json(dst_path: str, working_path: str) -> str | None:
+    """Copy the target's DFDv2 metadata beside an isolated output database."""
+    source_path = os.path.join(os.path.dirname(os.path.abspath(dst_path)), 'cycle.json')
+    if not os.path.isfile(source_path):
+        return None
+
+    target_path = os.path.join(
+        os.path.dirname(os.path.abspath(working_path)), 'cycle.json'
+    )
+    shutil.copy2(source_path, target_path)
+    return target_path
 
 
 def run_conversion(
@@ -196,17 +219,32 @@ def run_conversion(
             os.makedirs(os.path.dirname(working_path), exist_ok=True)
 
         if not no_backup and os.path.exists(working_path):
-            # Back up the file that will actually be replaced.
+            # Back up the database and any Community package metadata that the
+            # conversion will replace.
             backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
             os.makedirs(backup_dir, exist_ok=True)
             timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-            fname = os.path.basename(working_path)
-            backup_path = os.path.join(backup_dir, f'{fname}.backup_{timestamp}')
-            log(f"Backup: {backup_path}")
-            shutil.copy2(working_path, backup_path)
+            companion_paths = [working_path]
+            cycle_path = os.path.join(os.path.dirname(working_path), 'cycle.json')
+            if os.path.exists(cycle_path):
+                companion_paths.append(cycle_path)
+            layout_path = find_package_layout(working_path)
+            if layout_path:
+                companion_paths.append(str(layout_path))
+
+            for source_path in companion_paths:
+                fname = os.path.basename(source_path)
+                target_path = os.path.join(
+                    backup_dir, f'{fname}.backup_{timestamp}'
+                )
+                log(f"Backup: {target_path}")
+                shutil.copy2(source_path, target_path)
+                if os.path.abspath(source_path) == os.path.abspath(working_path):
+                    backup_path = target_path
 
         if os.path.abspath(working_path) != os.path.abspath(dst_path):
             shutil.copy2(dst_path, working_path)
+            _copy_target_cycle_json(dst_path, working_path)
 
     dst_conn = open_target(working_path)
 
@@ -302,7 +340,10 @@ def run_conversion(
             vacuum(dst_conn)
 
             # Write cycle.json to target directory
-            _write_cycle_json(working_path, cycle_info)
+            cycle_json_path = _write_cycle_json(working_path, cycle_info)
+            layout_path = update_package_layout(working_path, cycle_json_path)
+            if layout_path:
+                log(f"Updated MSFS package layout: {layout_path}")
 
         log()
         check_integrity(dst_conn)
@@ -342,7 +383,7 @@ def run_conversion(
 # ---- CLI entry point ----
 def main():
     parser = argparse.ArgumentParser(
-        description='Fenix -> iniBuilds Navigation Data Converter (China Region)',
+        description='Fenix -> DFDv2 Navigation Data Converter (China Region)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -354,7 +395,7 @@ Examples:
     parser.add_argument('--src', default=None,
                         help='Path to Fenix nd.db3')
     parser.add_argument('--dst', default=None,
-                        help='Path to iniBuilds db.s3db')
+                        help='Path to target DFDv2 s3db')
     parser.add_argument('--csv', default=None,
                         help='Path to RTE_SEG.csv')
     parser.add_argument('--output', default=None,
@@ -371,6 +412,10 @@ Examples:
                         help='Do not create backup of destination db')
     parser.add_argument('--auto-detect', action='store_true',
                         help='Auto-detect paths instead of using defaults')
+    parser.add_argument(
+        '--aircraft', choices=('ini-a340', 'as346'), default='ini-a340',
+        help='Aircraft target used with --auto-detect (default: ini-a340)'
+    )
 
     args = parser.parse_args()
 
@@ -385,7 +430,11 @@ Examples:
         src_path = args.src or detected.get('fenix_db')
         csv_path = args.csv or detected.get('fenix_csv')
 
-        ini_results = detected.get('ini_s3db', {})
+        ini_results = (
+            detected.get('as346_s3db', {})
+            if args.aircraft == 'as346'
+            else detected.get('ini_s3db', {})
+        )
         # Prefer MSFS2024 paths over MSFS2020. Exclude "目录存在，无s3db"
         # placeholder entries (directory found but no db.s3db written yet) —
         # those keys are still labeled "MSFS2024 - ..." so a naive '2024' in k

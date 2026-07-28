@@ -45,13 +45,14 @@ class ConversionGUI:
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Fenix -> iniBuilds 导航数据转换工具 v1.2.1")
+        self.root.title("Fenix -> DFDv2 导航数据转换工具 v1.3.0")
         self.root.geometry("800x650")
         self.root.minsize(700, 550)
 
         self.conversion_thread: threading.Thread | None = None
         self.running = False
         self.redirect: RedirectText | None = None
+        self.detected_targets: dict[str, str] = {}
 
         self._build_ui()
 
@@ -63,7 +64,7 @@ class ConversionGUI:
         # Title
         title_frame = ttk.Frame(self.root, padding=10)
         title_frame.pack(fill=tk.X)
-        ttk.Label(title_frame, text="Fenix -> iniBuilds 导航数据转换工具",
+        ttk.Label(title_frame, text="Fenix -> DFDv2 导航数据转换工具",
                   font=('Microsoft YaHei', 14, 'bold')).pack()
         ttk.Label(title_frame, text="AIRAC 2607 | 中国区域数据补充 | MSFS2020/2024 支持",
                   font=('Microsoft YaHei', 9)).pack()
@@ -83,26 +84,39 @@ class ConversionGUI:
         self.detect_label = ttk.Label(btn_frame, text="", foreground="gray")
         self.detect_label.pack(side=tk.LEFT, padx=10)
 
-        # Row 1: Fenix nd.db3
-        ttk.Label(paths_frame, text="Fenix nd.db3:", width=18, anchor=tk.E).grid(row=1, column=0, sticky=tk.W, pady=2)
+        # Row 1: Aircraft target
+        ttk.Label(paths_frame, text="目标机模:", width=18, anchor=tk.E).grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.aircraft_var = tk.StringVar(value="iniBuilds A340")
+        self.aircraft_combo = ttk.Combobox(
+            paths_frame,
+            textvariable=self.aircraft_var,
+            values=("iniBuilds A340", "Aerosoft AS346"),
+            state="readonly",
+            width=67,
+        )
+        self.aircraft_combo.grid(row=1, column=1, sticky=tk.EW, padx=5, pady=2)
+        self.aircraft_combo.bind("<<ComboboxSelected>>", self._on_aircraft_changed)
+
+        # Row 2: Fenix nd.db3
+        ttk.Label(paths_frame, text="Fenix nd.db3:", width=18, anchor=tk.E).grid(row=2, column=0, sticky=tk.W, pady=2)
         self.src_var = tk.StringVar()
         self.src_entry = ttk.Entry(paths_frame, textvariable=self.src_var, width=70)
-        self.src_entry.grid(row=1, column=1, sticky=tk.EW, padx=5, pady=2)
-        ttk.Button(paths_frame, text="浏览...", command=self.browse_src).grid(row=1, column=2, pady=2)
+        self.src_entry.grid(row=2, column=1, sticky=tk.EW, padx=5, pady=2)
+        ttk.Button(paths_frame, text="浏览...", command=self.browse_src).grid(row=2, column=2, pady=2)
 
-        # Row 2: iniBuilds db.s3db
-        ttk.Label(paths_frame, text="iniBuilds db.s3db:", width=18, anchor=tk.E).grid(row=2, column=0, sticky=tk.W, pady=2)
+        # Row 3: target DFDv2 database
+        ttk.Label(paths_frame, text="目标 DFDv2 数据库:", width=18, anchor=tk.E).grid(row=3, column=0, sticky=tk.W, pady=2)
         self.dst_var = tk.StringVar()
         self.dst_entry = ttk.Entry(paths_frame, textvariable=self.dst_var, width=70)
-        self.dst_entry.grid(row=2, column=1, sticky=tk.EW, padx=5, pady=2)
-        ttk.Button(paths_frame, text="浏览...", command=self.browse_dst).grid(row=2, column=2, pady=2)
+        self.dst_entry.grid(row=3, column=1, sticky=tk.EW, padx=5, pady=2)
+        ttk.Button(paths_frame, text="浏览...", command=self.browse_dst).grid(row=3, column=2, pady=2)
 
-        # Row 3: RTE_SEG.csv
-        ttk.Label(paths_frame, text="RTE_SEG.csv (可选):", width=18, anchor=tk.E).grid(row=3, column=0, sticky=tk.W, pady=2)
+        # Row 4: RTE_SEG.csv
+        ttk.Label(paths_frame, text="RTE_SEG.csv (可选):", width=18, anchor=tk.E).grid(row=4, column=0, sticky=tk.W, pady=2)
         self.csv_var = tk.StringVar()
         self.csv_entry = ttk.Entry(paths_frame, textvariable=self.csv_var, width=70)
-        self.csv_entry.grid(row=3, column=1, sticky=tk.EW, padx=5, pady=2)
-        ttk.Button(paths_frame, text="浏览...", command=self.browse_csv).grid(row=3, column=2, pady=2)
+        self.csv_entry.grid(row=4, column=1, sticky=tk.EW, padx=5, pady=2)
+        ttk.Button(paths_frame, text="浏览...", command=self.browse_csv).grid(row=4, column=2, pady=2)
 
         paths_frame.columnconfigure(1, weight=1)
 
@@ -171,7 +185,7 @@ class ConversionGUI:
 
     def browse_dst(self):
         path = filedialog.askopenfilename(
-            title="选择 iniBuilds db.s3db",
+            title="选择目标 DFDv2 数据库",
             filetypes=[("SQLite Database", "*.s3db"), ("All Files", "*.*")]
         )
         if path:
@@ -186,6 +200,11 @@ class ConversionGUI:
             self.csv_var.set(path)
 
     # ---- Auto Detection ----
+    def _on_aircraft_changed(self, _event=None):
+        path = self.detected_targets.get(self.aircraft_var.get())
+        if path:
+            self.dst_var.set(path)
+
     def auto_detect(self):
         """Auto-detect navigation data paths and prompt user."""
         self.log("检测导航数据路径...\n")
@@ -199,6 +218,7 @@ class ConversionGUI:
         fenix = results.get('fenix_db')
         csv_path = results.get('fenix_csv')
         ini_results = results.get('ini_s3db', {})
+        as346_results = results.get('as346_s3db', {})
         naip = results.get('naip_completeness')
 
         # Build detection summary
@@ -230,6 +250,12 @@ class ConversionGUI:
         else:
             lines.append(f"  [--] iniBuilds: 未找到")
 
+        if as346_results:
+            lines.append(f"  Aerosoft AS346: 检测到 {len(as346_results)} 个位置")
+            for label, path in as346_results.items():
+                lines.append(f"    [{label}]")
+                lines.append(f"    {path}")
+
         msg = '\n'.join(lines)
 
         # Auto-select best match. Exclude "目录存在，无s3db" placeholder
@@ -245,6 +271,22 @@ class ConversionGUI:
         elif msfs20_keys:
             selected_label = msfs20_keys[0]
             selected_ini = ini_results[selected_label]
+
+        self.detected_targets = {}
+        for label, path in ini_results.items():
+            if 'a340' in label.lower() and 'BundledData' in label:
+                self.detected_targets.setdefault("iniBuilds A340", path)
+        for label, path in as346_results.items():
+            if 'fallback' not in label.lower():
+                self.detected_targets.setdefault("Aerosoft AS346", path)
+
+        available_targets = list(self.detected_targets)
+        if available_targets:
+            self.aircraft_combo.configure(values=available_targets)
+            if self.aircraft_var.get() not in self.detected_targets:
+                self.aircraft_var.set(available_targets[0])
+            selected_label = self.aircraft_var.get()
+            selected_ini = self.detected_targets[selected_label]
 
         # Build summary for dialog
         summary = f"Fenix: {fenix or '未找到'}\nCSV: {csv_path or '未找到'}\niniBuilds: {selected_label or '未找到'}"
@@ -293,13 +335,13 @@ class ConversionGUI:
             messagebox.showerror("错误", "请选择 Fenix nd.db3 文件路径")
             return
         if not dst:
-            messagebox.showerror("错误", "请选择 iniBuilds db.s3db 文件路径")
+            messagebox.showerror("错误", "请选择目标 DFDv2 数据库文件路径")
             return
         if not os.path.exists(src):
             messagebox.showerror("错误", f"Fenix nd.db3 不存在:\n{src}")
             return
         if not os.path.exists(dst):
-            messagebox.showerror("错误", f"iniBuilds db.s3db 不存在:\n{dst}")
+            messagebox.showerror("错误", f"目标 DFDv2 数据库不存在:\n{dst}")
             return
 
         skip_proc = not self.procedures_var.get()
@@ -399,7 +441,7 @@ class ConversionGUI:
         """Run verification on the selected database."""
         path = self.dst_var.get().strip()
         if not path or not os.path.exists(path):
-            messagebox.showerror("错误", "请先选择或自动检测 iniBuilds db.s3db")
+            messagebox.showerror("错误", "请先选择或自动检测目标 DFDv2 数据库")
             return
 
         self.clear_log()

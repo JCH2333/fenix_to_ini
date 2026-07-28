@@ -14,6 +14,8 @@ __pycache__/
 *.backup_*
 backups/
 diagnostics_tmp/
+/output/
+/cycle.json
 
 # SQLite temporary files
 *.shm

@@ -14,6 +14,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sqlite3
+import json
+import re
+from pathlib import Path
 
 
 CN_LAT_MIN, CN_LAT_MAX = 15.0, 55.0
@@ -31,6 +34,7 @@ def verify_all(db_path: str, source_path: str | None = None) -> bool:
 
     all_ok = True
 
+    all_ok &= check_runtime_compatibility(conn, db_path)
     all_ok &= check_row_counts(conn)
     all_ok &= check_frequency_ranges(conn)
     all_ok &= check_coordinate_ranges(conn)
@@ -47,6 +51,68 @@ def verify_all(db_path: str, source_path: str | None = None) -> bool:
 
     conn.close()
     return all_ok
+
+
+def check_runtime_compatibility(conn, db_path: str) -> bool:
+    """Check the invariants required by the iniBuilds WASM DFDv2 reader."""
+    print("\n--- iniBuilds Runtime Compatibility Check ---")
+    ok = True
+
+    journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    if journal_mode != "delete":
+        print(f"  [FAIL] SQLite journal mode is {journal_mode}, expected delete")
+        ok = False
+    else:
+        print("  [OK] SQLite journal mode: delete")
+
+    rows = conn.execute(
+        "SELECT cycle, revision, effective_fromto FROM tbl_hdr_header"
+    ).fetchall()
+    if len(rows) != 1:
+        print(f"  [FAIL] Header row count: {len(rows)}, expected 1")
+        return False
+
+    cycle = str(rows[0]["cycle"] or "")
+    revision = str(rows[0]["revision"] or "")
+    effective = str(rows[0]["effective_fromto"] or "")
+    if not re.fullmatch(r"\d{4}", cycle):
+        print(f"  [FAIL] Header cycle must be four digits: {cycle!r}")
+        ok = False
+    if not re.fullmatch(r"\d{3}", revision):
+        print(f"  [FAIL] Header revision must be three digits: {revision!r}")
+        ok = False
+    if not re.fullmatch(r"\d{10}", effective):
+        print(f"  [FAIL] Header effective_fromto must be ten digits: {effective!r}")
+        ok = False
+    if ok:
+        print(f"  [OK] DFDv2 header: {cycle} R{int(revision)} ({effective})")
+
+    cycle_path = Path(db_path).resolve().with_name("cycle.json")
+    if cycle_path.is_file():
+        try:
+            payload = json.loads(cycle_path.read_text(encoding="utf-8"))
+            json_cycle = str(payload.get("cycle", ""))
+            json_revision = str(payload.get("revision", ""))
+            revisions_match = (
+                revision.isdigit()
+                and json_revision.isdigit()
+                and int(revision) == int(json_revision)
+            )
+            if json_cycle != cycle or not revisions_match:
+                print(
+                    "  [FAIL] cycle.json does not match database header: "
+                    f"{json_cycle} R{json_revision} vs {cycle} R{revision}"
+                )
+                ok = False
+            else:
+                print("  [OK] cycle.json matches database header")
+        except (OSError, ValueError) as error:
+            print(f"  [FAIL] Unable to read cycle.json: {error}")
+            ok = False
+    else:
+        print("  [WARN] cycle.json not found beside database")
+
+    return ok
 
 
 def check_row_counts(conn) -> bool:

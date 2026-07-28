@@ -27,8 +27,15 @@ def open_target(path: str) -> sqlite3.Connection:
     """Open iniBuilds db.s3db for read-write."""
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    # Enable WAL mode for better concurrent performance
-    conn.execute("PRAGMA journal_mode=WAL")
+    # The MSFS WASM VFS expects the same rollback journal mode as the bundled
+    # iniBuilds database. WAL databases can pass desktop SQLite checks but fail
+    # to open inside the aircraft.
+    mode = conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+    if str(mode).lower() != "delete":
+        conn.close()
+        raise sqlite3.OperationalError(
+            f"Unable to set iniBuilds-compatible journal mode: {mode}"
+        )
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size=-65536")  # 64MB cache
     return conn

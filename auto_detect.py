@@ -9,6 +9,7 @@ import os
 import glob
 import sys
 import sqlite3
+import re
 
 
 # 判定"完整 NAIP 中国程序数据"的最小机场数阈值。
@@ -92,6 +93,41 @@ def detect_inibuilds_s3db() -> dict[str, str]:
     appdata = get_appdata()
     results = {}
 
+    # Prefer the Community package's bundled database. iniBuilds copies this
+    # file into WASM work/NavigationData during startup, so converting only the
+    # work copy is temporary and will be overwritten by the aircraft.
+    user_cfg = os.path.join(
+        appdata, 'Microsoft Flight Simulator 2024', 'UserCfg.opt'
+    )
+    package_root = None
+    if os.path.isfile(user_cfg):
+        with open(user_cfg, 'r', encoding='utf-8', errors='ignore') as handle:
+            match = re.search(
+                r'InstalledPackagesPath\s+"([^"]+)"', handle.read(), re.IGNORECASE
+            )
+        if match:
+            package_root = os.path.normpath(match.group(1))
+
+    if package_root:
+        community_dirs = [package_root]
+        community_dirs.extend(
+            os.path.join(package_root, name)
+            for name in ('Community', 'Community2024')
+        )
+        for community_dir in community_dirs:
+            if not os.path.isdir(community_dir):
+                continue
+            pattern = os.path.join(community_dir, 'inibuilds-aircraft-*')
+            for ac_dir in sorted(glob.glob(pattern)):
+                bundled_pattern = os.path.join(
+                    ac_dir, 'Navigraph', 'BundledData', '*.s3db'
+                )
+                bundled_files = sorted(glob.glob(bundled_pattern))
+                if bundled_files:
+                    ac_name = os.path.basename(ac_dir)
+                    label = f'MSFS2024 - {ac_name} (BundledData)'
+                    results[label] = os.path.normpath(bundled_files[0])
+
     # --- MSFS2024 ---
     msfs24_base = os.path.join(
         appdata,
@@ -130,6 +166,30 @@ def detect_inibuilds_s3db() -> dict[str, str]:
             if os.path.exists(s3db_path):
                 ac_name = os.path.basename(ac_dir)
                 results[f'MSFS2020 - {ac_name}'] = os.path.normpath(s3db_path)
+
+    return results
+
+
+def detect_as346_s3db() -> dict[str, str]:
+    """Detect Aerosoft AS346 downloaded and fallback DFDv2 databases."""
+    appdata = get_appdata()
+    results = {}
+    work_dir = os.path.join(
+        appdata,
+        'Microsoft Flight Simulator 2024',
+        'WASM',
+        'MSFS2024',
+        'aerosoft-aircraft-a346-pro',
+        'work',
+    )
+
+    cycle_pattern = os.path.join(work_dir, 'FMSData', 'cycle_*', '*.s3db')
+    for path in sorted(glob.glob(cycle_pattern), reverse=True):
+        cycle_dir = os.path.basename(os.path.dirname(path))
+        results[f'MSFS2024 - Aerosoft AS346 ({cycle_dir})'] = os.path.normpath(path)
+
+    for path in sorted(glob.glob(os.path.join(work_dir, '*.s3db'))):
+        results['MSFS2024 - Aerosoft AS346 (fallback)'] = os.path.normpath(path)
 
     return results
 
@@ -195,6 +255,7 @@ def detect_all() -> dict:
         'fenix_db': fenix_db,
         'fenix_csv': detect_fenix_csv(),
         'ini_s3db': detect_inibuilds_s3db(),
+        'as346_s3db': detect_as346_s3db(),
         'naip_completeness': naip_completeness,
     }
 
