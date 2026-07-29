@@ -31,7 +31,10 @@ class IniBuildsDetectionTests(unittest.TestCase):
             wasm.parent.mkdir(parents=True)
             wasm.touch()
 
-            with patch.dict(os.environ, {"APPDATA": str(appdata)}):
+            with patch.dict(os.environ, {
+                "APPDATA": str(appdata),
+                "LOCALAPPDATA": str(root / "LocalAppData"),
+            }):
                 results = detect_inibuilds_s3db()
 
         first_path = next(iter(results.values()))
@@ -53,11 +56,95 @@ class IniBuildsDetectionTests(unittest.TestCase):
             old_db.touch()
             new_db.touch()
 
-            with patch.dict(os.environ, {"APPDATA": str(appdata)}):
+            with patch.dict(os.environ, {
+                "APPDATA": str(appdata),
+                "LOCALAPPDATA": str(Path(temp_dir) / "LocalAppData"),
+            }):
                 results = detect_as346_s3db()
 
         self.assertEqual(Path(next(iter(results.values()))), new_db)
         self.assertIn("2607", next(iter(results)))
+
+    def test_detects_store_xbox_default_community_database(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            localappdata = root / "LocalAppData"
+            bundled = (
+                localappdata / "Packages" /
+                "Microsoft.Limitless_8wekyb3d8bbwe" / "LocalCache" /
+                "Packages" / "Community" / "inibuilds-aircraft-a340" /
+                "Navigraph" / "BundledData" /
+                "ng_jeppesen_fwdfd_2607.s3db"
+            )
+            bundled.parent.mkdir(parents=True)
+            bundled.touch()
+
+            with patch.dict(os.environ, {
+                "APPDATA": str(root / "AppData"),
+                "LOCALAPPDATA": str(localappdata),
+            }):
+                results = detect_inibuilds_s3db()
+
+        self.assertEqual(Path(next(iter(results.values()))), bundled)
+        self.assertIn("Store/Xbox", next(iter(results)))
+
+    def test_honors_store_xbox_user_cfg_custom_package_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            localappdata = root / "LocalAppData"
+            local_cache = (
+                localappdata / "Packages" /
+                "Microsoft.Limitless_8wekyb3d8bbwe" / "LocalCache"
+            )
+            packages = root / "CustomPackages"
+            bundled = (
+                packages / "inibuilds-aircraft-a340" / "Navigraph" /
+                "BundledData" / "ng_jeppesen_fwdfd_2607.s3db"
+            )
+            bundled.parent.mkdir(parents=True)
+            bundled.touch()
+            local_cache.mkdir(parents=True)
+            (local_cache / "UserCfg.opt").write_text(
+                f'InstalledPackagesPath "{packages}"', encoding="utf-8"
+            )
+
+            with patch.dict(os.environ, {
+                "APPDATA": str(root / "AppData"),
+                "LOCALAPPDATA": str(localappdata),
+            }):
+                results = detect_inibuilds_s3db()
+
+        self.assertIn(bundled, map(Path, results.values()))
+        custom_label = next(
+            label for label, path in results.items() if Path(path) == bundled
+        )
+        self.assertIn("Store/Xbox", custom_label)
+
+    def test_detects_store_xbox_as346_cycle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            localappdata = root / "LocalAppData"
+            store_user_data = (
+                localappdata / "Packages" /
+                "Microsoft.Limitless_8wekyb3d8bbwe" / "LocalCache" /
+                "Packages" / "Microsoft Flight Simulator 2024"
+            )
+            database = (
+                store_user_data / "WASM" / "MSFS2024" /
+                "aerosoft-aircraft-a346-pro" / "work" / "FMSData" /
+                "cycle_2607" / "ng_jeppesen_fwdfd_2607.s3db"
+            )
+            database.parent.mkdir(parents=True)
+            database.touch()
+
+            with patch.dict(os.environ, {
+                "APPDATA": str(root / "AppData"),
+                "LOCALAPPDATA": str(localappdata),
+            }):
+                results = detect_as346_s3db()
+
+        self.assertEqual(Path(next(iter(results.values()))), database)
+        self.assertIn("Store/Xbox", next(iter(results)))
 
 
 if __name__ == "__main__":

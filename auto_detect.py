@@ -1,8 +1,8 @@
 """
 Auto-detection module for navigation data paths.
 
-Detects Fenix nd.db3 and iniBuilds db.s3db locations for both
-MSFS2020 and MSFS2024 installations.
+Detects Fenix nd.db3 and iniBuilds db.s3db locations for MSFS2020 and
+MSFS2024 Steam, Microsoft Store, and Xbox installations.
 """
 
 import os
@@ -22,6 +22,109 @@ def get_appdata() -> str:
     """Get AppData/Roaming path."""
     return os.environ.get('APPDATA',
         os.path.expandvars(r'%USERPROFILE%\AppData\Roaming'))
+
+
+def get_localappdata() -> str:
+    """Get AppData/Local path."""
+    return os.environ.get(
+        'LOCALAPPDATA',
+        os.path.expandvars(r'%USERPROFILE%\AppData\Local'),
+    )
+
+
+def _add_unique_path(items: list[tuple[str, str]], label: str, path: str):
+    """Append a path unless the same normalized path is already present."""
+    normalized = os.path.normcase(os.path.abspath(path))
+    if any(os.path.normcase(os.path.abspath(item_path)) == normalized
+           for _, item_path in items):
+        return
+    items.append((label, os.path.normpath(path)))
+
+
+def _read_installed_packages_path(user_cfg: str) -> str | None:
+    if not os.path.isfile(user_cfg):
+        return None
+    try:
+        with open(user_cfg, 'r', encoding='utf-8', errors='ignore') as handle:
+            match = re.search(
+                r'InstalledPackagesPath\s+"([^"]+)"',
+                handle.read(),
+                re.IGNORECASE,
+            )
+    except OSError:
+        return None
+    return os.path.normpath(match.group(1)) if match else None
+
+
+def _msfs2024_locations() -> tuple[list[tuple[str, str]],
+                                   list[tuple[str, str]]]:
+    """Return MSFS 2024 user-data roots and installed-package roots.
+
+    Store/Xbox installations use the ``Microsoft.Limitless_*`` package
+    family. Their files can be directly below LocalCache, below
+    LocalCache/Packages, or below a simulator-named child directory.
+    """
+    user_roots: list[tuple[str, str]] = []
+    package_roots: list[tuple[str, str]] = []
+
+    roaming_root = os.path.join(get_appdata(), 'Microsoft Flight Simulator 2024')
+    _add_unique_path(user_roots, 'MSFS2024', roaming_root)
+    configured = _read_installed_packages_path(
+        os.path.join(roaming_root, 'UserCfg.opt')
+    )
+    if configured:
+        _add_unique_path(package_roots, 'MSFS2024', configured)
+
+    store_pattern = os.path.join(
+        get_localappdata(), 'Packages', 'Microsoft.Limitless_*'
+    )
+    for store_package in sorted(glob.glob(store_pattern)):
+        if not os.path.isdir(store_package):
+            continue
+        local_cache = os.path.join(store_package, 'LocalCache')
+        local_state = os.path.join(store_package, 'LocalState')
+        store_candidates = (
+            local_cache,
+            os.path.join(local_cache, 'Packages'),
+            os.path.join(local_cache, 'Microsoft Flight Simulator 2024'),
+            os.path.join(
+                local_cache, 'Packages', 'Microsoft Flight Simulator 2024'
+            ),
+            local_state,
+            os.path.join(local_state, 'Microsoft Flight Simulator 2024'),
+        )
+        for candidate in store_candidates:
+            _add_unique_path(user_roots, 'MSFS2024 Store/Xbox', candidate)
+
+        _add_unique_path(
+            package_roots,
+            'MSFS2024 Store/Xbox',
+            os.path.join(local_cache, 'Packages'),
+        )
+        for candidate in store_candidates:
+            configured = _read_installed_packages_path(
+                os.path.join(candidate, 'UserCfg.opt')
+            )
+            if configured:
+                _add_unique_path(
+                    package_roots, 'MSFS2024 Store/Xbox', configured
+                )
+
+    return user_roots, package_roots
+
+
+def _add_result(results: dict[str, str], label: str, path: str):
+    """Add a detected database without duplicating an existing file path."""
+    normalized = os.path.normcase(os.path.abspath(path))
+    if any(os.path.normcase(os.path.abspath(found)) == normalized
+           for found in results.values()):
+        return
+    original_label = label
+    suffix = 2
+    while label in results:
+        label = f'{original_label} ({suffix})'
+        suffix += 1
+    results[label] = os.path.normpath(path)
 
 
 def detect_fenix_db() -> str | None:
@@ -85,30 +188,19 @@ def detect_inibuilds_s3db() -> dict[str, str]:
     MSFS2024 path pattern:
         %AppData%/Microsoft Flight Simulator 2024/WASM/MSFS2024/
             inibuilds-aircraft-*/work/NavigationData/db.s3db
+        %LocalAppData%/Packages/Microsoft.Limitless_*/LocalCache/...
 
     MSFS2020 path pattern:
         %AppData%/Microsoft Flight Simulator/packages/
             inibuilds-aircraft-*/work/NavigationData/db.s3db
     """
-    appdata = get_appdata()
     results = {}
+    user_roots, package_roots = _msfs2024_locations()
 
     # Prefer the Community package's bundled database. iniBuilds copies this
     # file into WASM work/NavigationData during startup, so converting only the
     # work copy is temporary and will be overwritten by the aircraft.
-    user_cfg = os.path.join(
-        appdata, 'Microsoft Flight Simulator 2024', 'UserCfg.opt'
-    )
-    package_root = None
-    if os.path.isfile(user_cfg):
-        with open(user_cfg, 'r', encoding='utf-8', errors='ignore') as handle:
-            match = re.search(
-                r'InstalledPackagesPath\s+"([^"]+)"', handle.read(), re.IGNORECASE
-            )
-        if match:
-            package_root = os.path.normpath(match.group(1))
-
-    if package_root:
+    for source_label, package_root in package_roots:
         community_dirs = [package_root]
         community_dirs.extend(
             os.path.join(package_root, name)
@@ -125,17 +217,14 @@ def detect_inibuilds_s3db() -> dict[str, str]:
                 bundled_files = sorted(glob.glob(bundled_pattern))
                 if bundled_files:
                     ac_name = os.path.basename(ac_dir)
-                    label = f'MSFS2024 - {ac_name} (BundledData)'
-                    results[label] = os.path.normpath(bundled_files[0])
+                    label = f'{source_label} - {ac_name} (BundledData)'
+                    _add_result(results, label, bundled_files[0])
 
     # --- MSFS2024 ---
-    msfs24_base = os.path.join(
-        appdata,
-        'Microsoft Flight Simulator 2024',
-        'WASM',
-        'MSFS2024'
-    )
-    if os.path.isdir(msfs24_base):
+    for source_label, user_root in user_roots:
+        msfs24_base = os.path.join(user_root, 'WASM', 'MSFS2024')
+        if not os.path.isdir(msfs24_base):
+            continue
         pattern = os.path.join(msfs24_base, 'inibuilds-aircraft-*')
         for ac_dir in glob.glob(pattern):
             if not os.path.isdir(ac_dir):
@@ -143,17 +232,23 @@ def detect_inibuilds_s3db() -> dict[str, str]:
             s3db_path = os.path.join(ac_dir, 'work', 'NavigationData', 'db.s3db')
             if os.path.exists(s3db_path):
                 ac_name = os.path.basename(ac_dir)
-                results[f'MSFS2024 - {ac_name}'] = os.path.normpath(s3db_path)
+                _add_result(
+                    results, f'{source_label} - {ac_name}', s3db_path
+                )
             else:
                 # Check if directory exists but no s3db yet
                 nav_dir = os.path.join(ac_dir, 'work', 'NavigationData')
                 if os.path.isdir(nav_dir):
                     ac_name = os.path.basename(ac_dir)
-                    results[f'MSFS2024 - {ac_name} (目录存在，无s3db)'] = os.path.normpath(nav_dir)
+                    _add_result(
+                        results,
+                        f'{source_label} - {ac_name} (目录存在，无s3db)',
+                        nav_dir,
+                    )
 
     # --- MSFS2020 ---
     msfs20_base = os.path.join(
-        appdata,
+        get_appdata(),
         'Microsoft Flight Simulator',
         'packages'
     )
@@ -172,24 +267,32 @@ def detect_inibuilds_s3db() -> dict[str, str]:
 
 def detect_as346_s3db() -> dict[str, str]:
     """Detect Aerosoft AS346 downloaded and fallback DFDv2 databases."""
-    appdata = get_appdata()
     results = {}
-    work_dir = os.path.join(
-        appdata,
-        'Microsoft Flight Simulator 2024',
-        'WASM',
-        'MSFS2024',
-        'aerosoft-aircraft-a346-pro',
-        'work',
-    )
+    user_roots, _ = _msfs2024_locations()
+    for source_label, user_root in user_roots:
+        work_dir = os.path.join(
+            user_root,
+            'WASM',
+            'MSFS2024',
+            'aerosoft-aircraft-a346-pro',
+            'work',
+        )
 
-    cycle_pattern = os.path.join(work_dir, 'FMSData', 'cycle_*', '*.s3db')
-    for path in sorted(glob.glob(cycle_pattern), reverse=True):
-        cycle_dir = os.path.basename(os.path.dirname(path))
-        results[f'MSFS2024 - Aerosoft AS346 ({cycle_dir})'] = os.path.normpath(path)
+        cycle_pattern = os.path.join(work_dir, 'FMSData', 'cycle_*', '*.s3db')
+        for path in sorted(glob.glob(cycle_pattern), reverse=True):
+            cycle_dir = os.path.basename(os.path.dirname(path))
+            _add_result(
+                results,
+                f'{source_label} - Aerosoft AS346 ({cycle_dir})',
+                path,
+            )
 
-    for path in sorted(glob.glob(os.path.join(work_dir, '*.s3db'))):
-        results['MSFS2024 - Aerosoft AS346 (fallback)'] = os.path.normpath(path)
+        for path in sorted(glob.glob(os.path.join(work_dir, '*.s3db'))):
+            _add_result(
+                results,
+                f'{source_label} - Aerosoft AS346 (fallback)',
+                path,
+            )
 
     return results
 
