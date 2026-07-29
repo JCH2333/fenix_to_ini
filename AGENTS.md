@@ -44,14 +44,18 @@
    - NDB `magnetic_variation` 不能为 NULL。
    - 航路点和航路标识不得超过目标缓冲区长度。
    - 航路固定字段不能为 NULL，距离必须在合理范围内。
-5. RF 航段必须至少具有正数 `arc_radius`。Fenix RF 原始行通常只提供弧心、上一航点、终点和转向，需要计算：
+   - SID、STAR 和 IAP 的非空 `waypoint_description_code` 必须恰好为 4 个字符；不足时右侧补空格。
+   - `altitude_description` 只能是单字符 ARINC 约束。Fenix 的 `MAP` 是复飞点标记，不能写入该字段。
+   - `waypoint_identifier`、`recommended_navaid` 与各自的 `*_icao_code` 必须保持 NULL 联动，不能出现标识符为空但 ICAO 代码非空的组合。
+5. AS346 会在设置航线机场时加载该机场的完整 SID、STAR 和 IAP。2026-07-29 实机验证表明，违反上述程序字段契约的数据会在输入出发/到达机场后触发 WASM `0xc0000005`；规范化后 `ZUNZ/ZUUU` 的离场、进场和进近均可正常选择。其程序 SQL 不读取弧心字段，因此 `center_waypoint_icao_code` 的 NULL 联动属于一致性清理，不是此次崩溃的直接触发条件。
+6. RF 航段必须至少具有正数 `arc_radius`。Fenix RF 原始行通常只提供弧心、上一航点、终点和转向，需要计算：
    - 半径：弧心到终点的大圆距离，单位海里。
    - 弧长：平均半径乘以按转向确定的圆心角，单位海里。
    - 可以同时写入 `route_distance_holding_distance_time='D'` 和 `distance_time`，但官方 AS346 数据表明后两者允许为空。
-6. 程序转换必须按 Terminal、route type、transition 分段，并在段内重新生成连续 `seqno`。
-7. Fenix 原始库可能包含除 ID 外完全相同的连续程序行，写入目标前必须去重，否则会生成零长度 RF 航段。
-8. 公共程序段可能以 RF 开始。只有当前置跑道过渡段的终点完全一致时，才可继承该共享终点作为 RF 起点。
-9. RF 缺失左右转向时，可以根据弧心到起终点的方位选择较短圆弧并补出转向；仍无法确定时不得输出无效 RF。
+7. 程序转换必须按 Terminal、route type、transition 分段，并在段内重新生成连续 `seqno`。
+8. Fenix 原始库可能包含除 ID 外完全相同的连续程序行，写入目标前必须去重，否则会生成零长度 RF 航段。
+9. 公共程序段可能以 RF 开始。只有当前置跑道过渡段的终点完全一致时，才可继承该共享终点作为 RF 起点。
+10. RF 缺失左右转向时，可以根据弧心到起终点的方位选择较短圆弧并补出转向；仍无法确定时不得输出无效 RF。
 
 ## 转换器设计要求
 
