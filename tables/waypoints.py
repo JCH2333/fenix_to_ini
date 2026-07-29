@@ -138,22 +138,33 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
 
     print(f"  Chinese terminal waypoints (from TerminalLegs): {len(terminal_wpt_ids)}")
 
-    # Step 2: Read all Fenix waypoints in Chinese airspace
+    # Step 2: Read Fenix waypoints required by the Chinese dataset.  A broad
+    # coordinate box is not a valid region boundary: it also covers large
+    # parts of Central, South and East Asia.  Only NAIP-designated enroute
+    # points belong in EA; procedure-only points belong in PC.
     fenix_waypoints = src_conn.execute("""
         SELECT ID, Ident, Collocated, Name, Latitude, Longtitude, NavaidID
         FROM Waypoints
         ORDER BY ID
     """).fetchall()
-
-    # Filter by airspace
-    cn_waypoints = [w for w in fenix_waypoints
-                    if is_cn_airspace(w['Latitude'], w['Longtitude'])]
+    enroute_waypoint_regions = {}
+    for waypoint in fenix_waypoints:
+        ident = (waypoint['Ident'] or '').strip()
+        region = region_lookup.get_waypoint_icao(ident) if ident else None
+        if region:
+            enroute_waypoint_regions[waypoint['ID']] = region
+    selected_waypoints = [
+        waypoint for waypoint in fenix_waypoints
+        if waypoint['ID'] in enroute_waypoint_regions
+        or waypoint['ID'] in terminal_wpt_ids
+    ]
     print(f"  Fenix total waypoints: {len(fenix_waypoints)}")
-    print(f"  Fenix Chinese airspace waypoints: {len(cn_waypoints)}")
+    print(f"  NAIP enroute waypoints: {len(enroute_waypoint_regions)}")
+    print(f"  Selected Chinese waypoints: {len(selected_waypoints)}")
 
     # Build waypoint lookup for downstream use
     waypoint_lookup = {}
-    for w in cn_waypoints:
+    for w in selected_waypoints:
         waypoint_lookup[w['ID']] = {
             'ident': (w['Ident'] or '').strip(),
             'lat': w['Latitude'] or 0.0,
@@ -186,7 +197,7 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
     pc_new = 0
     pc_updated = 0
 
-    for w in cn_waypoints:
+    for w in selected_waypoints:
         wpt_id = w['ID']
         ident = (w['Ident'] or '').strip()
         lat = w['Latitude'] or 0.0
@@ -220,28 +231,30 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
         else:
             usage = 'RH'  # High enroute only
 
-        # Enroute waypoints (all Chinese waypoints)
+        # Enroute waypoints listed by the NAIP source.  A terminal-only point
+        # must not be promoted into the global EA table.
         # Column order: area_code, continent, country, datum_code, icao_code,
         #               magnetic_variation, waypoint_identifier, waypoint_latitude,
         #               waypoint_longitude, waypoint_name, waypoint_type, waypoint_usage
-        if ident in existing_ea:
-            ea_updated += 1
-        else:
-            ea_new += 1
-        ea_rows.append((
-            area_code,        # area_code
-            None,             # continent
-            None,             # country
-            'WGE',            # datum_code
-            icao_code,        # icao_code
-            None,             # magnetic_variation
-            ident,            # waypoint_identifier
-            lat,              # waypoint_latitude
-            lon,              # waypoint_longitude
-            name,             # waypoint_name
-            wpt_type,         # waypoint_type
-            usage,            # waypoint_usage
-        ))
+        if wpt_id in enroute_waypoint_regions:
+            if ident in existing_ea:
+                ea_updated += 1
+            else:
+                ea_new += 1
+            ea_rows.append((
+                area_code,        # area_code
+                None,             # continent
+                None,             # country
+                'WGE',            # datum_code
+                icao_code,        # icao_code
+                None,             # magnetic_variation
+                ident,            # waypoint_identifier
+                lat,              # waypoint_latitude
+                lon,              # waypoint_longitude
+                name,             # waypoint_name
+                wpt_type,         # waypoint_type
+                usage,            # waypoint_usage
+            ))
 
         # Terminal waypoints
         # Column order: area_code, continent, country, datum_code, icao_code,
