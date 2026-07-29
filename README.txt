@@ -1,7 +1,7 @@
 ===============================================================================
   Fenix -> iniBuilds 导航数据转换工具
   中国区域数据补充 (NAIP)
-  版本: v1.3.0
+  版本: v1.4.0
   https://github.com/JCH2333/fenix_to_ini
 ===============================================================================
 
@@ -22,7 +22,7 @@
 本工具将 Fenix A320 的导航数据 (nd.db3, 含 NAIP 中国数据) 转换为 iniBuilds
 DFDv2 格式 (db.s3db)，补充到 MSFS2020/2024 的 iniBuilds 机模中。
 
-支持机型: iniBuilds A300, A320neo, A330, A340, A350
+支持机型: iniBuilds A300, A320neo, A330, A340, A350，以及 Aerosoft AS346
 
 转换范围: 中国空域 (ZB, ZG, ZH, ZJ, ZL, ZP, ZS, ZU, ZW, ZY) +
           特殊机场 OPGT (吉尔吉特), VHHX (启德)
@@ -32,13 +32,22 @@ DFDv2 格式 (db.s3db)，补充到 MSFS2020/2024 的 iniBuilds 机模中。
 
 转换后的导航数据周期与源 Fenix 数据保持一致。
 
+v1.4.0 更新简介:
+- 完成 Aerosoft AS346/ToLiss DFDv2 支持，新增目标格式识别、专用清洗和验证。
+- 修复 AS346 跑道物理顺序导致新增 NAIP 机场无法检索的问题。
+- 修复程序固定字段、NULL 联动及 MAP 高度描述错误导致的 WASM 0xc0000005 崩溃。
+- 补全 RF 航段半径、弧长、转向和公共程序段起点，去除重复零长度航段。
+- 修复 RTE_SEG 定长 DMS 纬度解析，以及缺失中间航点造成的假长航段。
+- 航路按航路名、航点和坐标跨数据源去重，保留有效记录且最终清洗不再删除数据。
+- AS346 实机验证通过：ZUNZ/ZUUU 可设置航线并选择 SID、STAR 和进近，WASM 不再崩溃。
+- 自动检测新增 Microsoft Store/Xbox 版 MSFS 2024 路径支持。
+
 v1.3.0 更新简介:
 - 修复仅覆盖 WASM 工作副本、启动后被 iniBuilds 原版数据自动还原的问题。
 - 自动检测优先选择 Community 机模包中的 Navigraph/BundledData 数据库。
 - 转换 Community 数据库后自动同步 layout.json 的文件大小和时间戳。
 - 按 DFDv2 规范将 2607n2 写为周期 2607、修订号 2，并保持 SQLite DELETE 日志模式。
 - 新增 Aerosoft AS346 实验性转换入口，自动选择 WASM/FMSData 中最新下载周期。
-- 已知限制: AS346 转换库可加载，但实机暂时无法检索新增 NAIP 机场，后续版本继续修复。
 
 v1.2.1 更新简介:
 - 兼容 MSFS 2024 iniBuilds A340 不含 ctl 可选列的 IAP 表结构。
@@ -146,6 +155,14 @@ tables/          - 各阶段表转换模块
 MSFS2024:
   %AppData%\Microsoft Flight Simulator 2024\WASM\MSFS2024\
     inibuilds-aircraft-*\work\NavigationData\db.s3db
+  %AppData%\Microsoft Flight Simulator 2024\WASM\MSFS2024\
+    aerosoft-aircraft-a346-pro\work\FMSData\cycle_*\ng_jeppesen_fwdfd_*.s3db
+
+MSFS2024 Microsoft Store/Xbox:
+  %LocalAppData%\Packages\Microsoft.Limitless_*\LocalCache\Packages\Community\
+    inibuilds-aircraft-*\Navigraph\BundledData\*.s3db
+  同时检测 LocalCache、LocalCache\Packages 和 LocalState 下的 UserCfg.opt、
+  Microsoft Flight Simulator 2024\WASM\MSFS2024 及自定义 InstalledPackagesPath。
 
 MSFS2020:
   %AppData%\Microsoft Flight Simulator\packages\

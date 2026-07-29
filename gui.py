@@ -45,7 +45,7 @@ class ConversionGUI:
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Fenix -> DFDv2 导航数据转换工具 v1.3.0")
+        self.root.title("Fenix -> DFDv2 导航数据转换工具 v1.4.0")
         self.root.geometry("800x650")
         self.root.minsize(700, 550)
 
