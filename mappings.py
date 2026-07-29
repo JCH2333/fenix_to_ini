@@ -191,7 +191,9 @@ def parse_altitude(alt_text: str) -> tuple[int | None, int | None, str | None]:
     alt_text = alt_text.strip().upper()
 
     if alt_text == 'MAP':
-        return None, None, 'MAP'
+        # MAP marks the missed-approach point; it is not an ARINC altitude
+        # description.  DFDv2 only accepts a single-character constraint here.
+        return None, None, None
 
     # Check for FL prefix
     is_fl = alt_text.startswith('FL')

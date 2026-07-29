@@ -341,6 +341,7 @@ def run_conversion(
                 f"补齐 {toliss_stats['ndb_magvar_defaulted']} 个 NDB 磁偏角，"
                 f"移除 {toliss_stats['waypoints_removed']} 个超长航路点，"
                 f"移除 {toliss_stats['airways_removed']} 条无效航路记录，"
+                f"规范化 {toliss_stats['procedure_fields_normalized']} 个程序字段，"
                 f"重排 {toliss_stats['runways_reordered']} 条跑道记录"
             )
 

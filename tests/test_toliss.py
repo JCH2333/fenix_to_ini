@@ -45,7 +45,15 @@ class TolissCompatibilityTests(unittest.TestCase):
                     path_termination TEXT NOT NULL,
                     route_distance_holding_distance_time TEXT,
                     arc_radius REAL,
-                    distance_time REAL
+                    distance_time REAL,
+                    altitude_description TEXT,
+                    center_waypoint_icao_code TEXT,
+                    center_waypoint TEXT,
+                    recommended_navaid_icao_code TEXT,
+                    recommended_navaid TEXT,
+                    waypoint_description_code TEXT,
+                    waypoint_icao_code TEXT,
+                    waypoint_identifier TEXT
                 )
                 """
             )
@@ -68,6 +76,17 @@ class TolissCompatibilityTests(unittest.TestCase):
                 ("A2", "TOOLONG", "E   ", 1.0, 20.0, 2.0),
                 ("A3", "VALID", "E   ", 1.0, 10440.0, 2.0),
             ],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO tbl_pd_sids (
+                path_termination, altitude_description,
+                center_waypoint_icao_code, center_waypoint,
+                recommended_navaid_icao_code, recommended_navaid,
+                waypoint_description_code, waypoint_icao_code,
+                waypoint_identifier
+            ) VALUES ('TF', 'MAP', 'ZB', NULL, 'ZB', NULL, 'E', 'ZB', NULL)
+            """
         )
         self.conn.executemany(
             "INSERT INTO tbl_pg_runways VALUES (?,?,?)",
@@ -99,10 +118,21 @@ class TolissCompatibilityTests(unittest.TestCase):
             "inbound_distance, outbound_course FROM tbl_er_enroute_airways"
         ).fetchone()
         self.assertEqual(tuple(row), ("E   ", 0.0, 0.0, 51.0))
+        procedure = self.conn.execute(
+            """
+            SELECT altitude_description, center_waypoint_icao_code,
+                   recommended_navaid_icao_code,
+                   waypoint_description_code, waypoint_icao_code
+            FROM tbl_pd_sids
+            """
+        ).fetchone()
+        self.assertEqual(tuple(procedure), (None, None, None, "E   ", None))
 
     def test_rejects_incomplete_rf_leg_geometry(self):
         self.conn.execute(
-            "INSERT INTO tbl_pf_iaps VALUES ('RF', NULL, NULL, NULL)"
+            "INSERT INTO tbl_pf_iaps ("
+            "path_termination, route_distance_holding_distance_time, "
+            "arc_radius, distance_time) VALUES ('RF', NULL, NULL, NULL)"
         )
         self.assertFalse(check_toliss_loader_compatibility(self.conn))
 

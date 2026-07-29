@@ -120,6 +120,43 @@ def check_toliss_loader_compatibility(conn) -> bool:
         ok = False
     else:
         print("  [OK] RF 航段半径无效: 0")
+    invalid_procedure_fields = 0
+    for table in ("tbl_pd_sids", "tbl_pe_stars", "tbl_pf_iaps"):
+        invalid_procedure_fields += conn.execute(
+            f"""
+            SELECT COUNT(1)
+            FROM {table}
+            WHERE (waypoint_description_code IS NOT NULL
+                   AND length(waypoint_description_code) <> 4)
+               OR (altitude_description IS NOT NULL
+                   AND length(altitude_description) <> 1)
+               OR ((waypoint_identifier IS NULL
+                    OR trim(waypoint_identifier) = '')
+                   AND waypoint_icao_code IS NOT NULL)
+               OR ((waypoint_identifier IS NOT NULL
+                    AND trim(waypoint_identifier) <> '')
+                   AND waypoint_icao_code IS NULL)
+               OR ((recommended_navaid IS NULL
+                    OR trim(recommended_navaid) = '')
+                   AND recommended_navaid_icao_code IS NOT NULL)
+               OR ((recommended_navaid IS NOT NULL
+                    AND trim(recommended_navaid) <> '')
+                   AND recommended_navaid_icao_code IS NULL)
+               OR ((center_waypoint IS NULL OR trim(center_waypoint) = '')
+                   AND center_waypoint_icao_code IS NOT NULL)
+               OR ((center_waypoint IS NOT NULL
+                    AND trim(center_waypoint) <> '')
+                   AND center_waypoint_icao_code IS NULL)
+            """
+        ).fetchone()[0]
+    if invalid_procedure_fields:
+        print(
+            "  [FAIL] 程序固定字段或 NULL 联动无效: "
+            f"{invalid_procedure_fields}"
+        )
+        ok = False
+    else:
+        print("  [OK] 程序固定字段或 NULL 联动无效: 0")
     return ok
 
 

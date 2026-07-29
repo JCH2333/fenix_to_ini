@@ -175,11 +175,57 @@ class ProcedureConversionTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            self.dst.execute(
-                "SELECT ctl FROM tbl_pf_iaps WHERE airport_identifier='ZBAA'"
-            ).fetchone()[0],
-            "N",
+            tuple(self.dst.execute(
+                "SELECT ctl, altitude_description "
+                "FROM tbl_pf_iaps WHERE airport_identifier='ZBAA'"
+            ).fetchone()),
+            ("N", None),
         )
+
+    def test_normalizes_fixed_fields_and_dependent_icao_codes(self):
+        self.src.execute(
+            "INSERT INTO Terminals VALUES (?,?,?,?,?,?,?,?,?)",
+            (60, 1, "2", "ZBAA", None, "FIX1D", "01", None, None),
+        )
+        self.src.executemany(
+            "INSERT INTO TerminalLegs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (1, 60, "5", "ALL", "IF", 101, 40.0, 116.0, None,
+                 None, None, None, None, None, None, None, None, None,
+                 None, None, None, "E"),
+                (2, 60, "5", "ALL", "CA", None, None, None, None,
+                 None, None, None, None, None, 180.0, None, None, None,
+                 None, None, None, None),
+            ],
+        )
+
+        convert_procedures(
+            self.src,
+            self.dst,
+            {1: "ZBAA"},
+            {},
+            {101: {"ident": "FIX01", "lat": 40.0, "lon": 116.0,
+                   "name": ""}},
+            {},
+        )
+
+        rows = self.dst.execute(
+            """
+            SELECT waypoint_description_code, waypoint_identifier,
+                   waypoint_icao_code, recommended_navaid,
+                   recommended_navaid_icao_code, center_waypoint,
+                   center_waypoint_icao_code
+            FROM tbl_pd_sids
+            WHERE airport_identifier='ZBAA'
+            ORDER BY seqno
+            """
+        ).fetchall()
+        self.assertEqual(rows[0]["waypoint_description_code"], "E   ")
+        self.assertEqual(rows[0]["waypoint_icao_code"], "ZB")
+        self.assertIsNone(rows[0]["recommended_navaid_icao_code"])
+        self.assertIsNone(rows[0]["center_waypoint_icao_code"])
+        self.assertIsNone(rows[1]["waypoint_identifier"])
+        self.assertIsNone(rows[1]["waypoint_icao_code"])
 
     def test_rf_leg_derives_radius_and_arc_distance_from_center(self):
         self.src.execute(

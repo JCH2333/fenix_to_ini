@@ -84,6 +84,43 @@ def sanitize_toliss_data(conn: sqlite3.Connection) -> dict[str, int]:
         "WHERE outbound_course IS NULL"
     )
 
+    procedure_fields_normalized = 0
+    for table in ("tbl_pd_sids", "tbl_pe_stars", "tbl_pf_iaps"):
+        cursor = conn.execute(
+            f"""
+            UPDATE {table}
+            SET waypoint_description_code =
+                substr(waypoint_description_code || '    ', 1, 4)
+            WHERE waypoint_description_code IS NOT NULL
+              AND length(waypoint_description_code) <> 4
+            """
+        )
+        procedure_fields_normalized += cursor.rowcount
+        cursor = conn.execute(
+            f"""
+            UPDATE {table}
+            SET altitude_description = NULL
+            WHERE altitude_description IS NOT NULL
+              AND length(altitude_description) <> 1
+            """
+        )
+        procedure_fields_normalized += cursor.rowcount
+        for identifier, icao_column in (
+            ("waypoint_identifier", "waypoint_icao_code"),
+            ("recommended_navaid", "recommended_navaid_icao_code"),
+            ("center_waypoint", "center_waypoint_icao_code"),
+        ):
+            cursor = conn.execute(
+                f"""
+                UPDATE {table}
+                SET {icao_column} = NULL
+                WHERE ({identifier} IS NULL OR trim({identifier}) = '')
+                  AND {icao_column} IS NOT NULL
+                """
+            )
+            procedure_fields_normalized += cursor.rowcount
+    stats["procedure_fields_normalized"] = procedure_fields_normalized
+
     runway_order_violations = count_runway_order_violations(conn)
     stats["runways_reordered"] = 0
     if runway_order_violations:

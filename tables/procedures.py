@@ -450,13 +450,20 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
 
     # RNP from waypoint description code
     rnp = None
-    if leg['WptDescCode']:
+    raw_waypoint_description = leg['WptDescCode']
+    waypoint_description = None
+    if raw_waypoint_description and str(raw_waypoint_description).strip():
+        waypoint_description = str(raw_waypoint_description)[:4].ljust(4)
         try:
-            rnp_val = float(leg['WptDescCode'])
+            rnp_val = float(raw_waypoint_description)
             if rnp_val > 0:
                 rnp = rnp_val
         except (ValueError, TypeError):
             pass
+
+    center_icao_code = icao_code if center_ident else None
+    recommended_navaid_icao_code = icao_code if nav_ident else None
+    waypoint_icao_code = icao_code if wpt_ident else None
 
     row = (
         icao,                           # airport_identifier
@@ -466,7 +473,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
         arc_radius,                     # arc_radius
         area_code,                      # area_code
         None,                           # authorization_required
-        icao_code,                      # center_waypoint_icao_code
+        center_icao_code,               # center_waypoint_icao_code
         center_lat,                     # center_waypoint_latitude
         center_lon,                     # center_waypoint_longitude
         center_ref,                     # center_waypoint_ref_table
@@ -476,7 +483,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
         dist_time,                      # distance_time
         path_term,                      # path_termination
         proc_ident,                     # procedure_identifier
-        icao_code,                      # recommended_navaid_icao_code
+        recommended_navaid_icao_code,   # recommended_navaid_icao_code
         nav_lat,                        # recommended_navaid_latitude
         nav_lon,                        # recommended_navaid_longitude
         nav_ref,                        # recommended_navaid_ref_table
@@ -493,8 +500,8 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
         transition,                     # transition_identifier
         turn_dir,                       # turn_direction
         vnav,                           # vertical_angle
-        leg['WptDescCode'] or None,     # waypoint_description_code
-        icao_code,                      # waypoint_icao_code
+        waypoint_description,           # waypoint_description_code
+        waypoint_icao_code,             # waypoint_icao_code
         wpt_ident,                      # waypoint_identifier
         wpt_lat,                        # waypoint_latitude
         wpt_lon,                        # waypoint_longitude
