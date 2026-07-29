@@ -137,14 +137,17 @@ def convert_airways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
     # Fenix airway legs are point-to-point segments.
     # We need to build ordered waypoint sequences for each airway.
     airway_routes = {}
+    unrepresentable_routes = 0
 
     for airway_id, legs in legs_by_airway.items():
-        airway_ident = airways.get(airway_id)
+        airway_ident = (airways.get(airway_id) or '').strip()
         if not airway_ident:
             continue
 
-        # Skip airways with non-standard identifiers
-        if airway_ident.startswith('XX'):
+        # AS346 stores route identifiers in a five-character fixed buffer.
+        if airway_ident.startswith('XX') or len(airway_ident) > 5:
+            if len(airway_ident) > 5:
+                unrepresentable_routes += 1
             continue
 
         # Build point sequence from start to end
@@ -189,14 +192,21 @@ def convert_airways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
             airway_routes[airway_ident] = sequence
 
     print(f"  Airways with valid route sequences: {len(airway_routes)}")
+    if unrepresentable_routes:
+        print(
+            "  目标格式无法表示的超长航路名: "
+            f"{unrepresentable_routes}"
+        )
 
     # Collect existing airway data for dedup
-    existing_airways = set()
+    existing_airways = defaultdict(list)
     for row in dst_conn.execute(
-        "SELECT route_identifier, seqno, waypoint_identifier FROM tbl_er_enroute_airways"
+        "SELECT route_identifier, waypoint_identifier, waypoint_latitude, "
+        "waypoint_longitude FROM tbl_er_enroute_airways"
     ):
-        existing_airways.add((row['route_identifier'], row['seqno'],
-                              row['waypoint_identifier']))
+        existing_airways[
+            (row['route_identifier'], row['waypoint_identifier'])
+        ].append((row['waypoint_latitude'], row['waypoint_longitude']))
 
     # Generate airway rows
     new_rows = []
@@ -209,6 +219,7 @@ def convert_airways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
 
         has_cn_point = False
         segments = []
+        previous_point = None
 
         for i, wpt_id in enumerate(wpt_ids):
             # Look up waypoint
@@ -221,11 +232,16 @@ def convert_airways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
                            'lon': nav['lon'], 'name': nav['name']}
 
             if not wpt:
+                previous_point = None
                 continue
 
-            ident = wpt['ident']
+            ident = (wpt['ident'] or '').strip()
             lat = wpt['lat']
             lon = wpt['lon']
+            if (not ident or len(ident) > 5 or lat is None or lon is None
+                    or not (-90 <= lat <= 90) or not (-180 <= lon <= 180)):
+                previous_point = None
+                continue
 
             if is_cn_airspace(lat, lon):
                 has_cn_point = True
@@ -237,13 +253,14 @@ def convert_airways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
             outbound_course = None
             inbound_dist = None
 
-            if i > 0 and segments:
-                prev = segments[-1]
-                prev_lat = prev[17]  # waypoint_latitude
-                prev_lon = prev[18]  # waypoint_longitude
+            if previous_point is not None:
+                prev_lat, prev_lon = previous_point
                 inbound_course, inbound_dist = compute_course_and_distance(
                     prev_lat, prev_lon, lat, lon
                 )
+                if inbound_dist > 1000.0:
+                    inbound_course = None
+                    inbound_dist = None
 
             if i < len(wpt_ids) - 1:
                 next_id = wpt_ids[i + 1]
@@ -253,9 +270,11 @@ def convert_airways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
                     if nav:
                         next_wpt = {'lat': nav['lat'], 'lon': nav['lon']}
                 if next_wpt:
-                    outbound_course, _ = compute_course_and_distance(
+                    outbound_course, outbound_distance = compute_course_and_distance(
                         lat, lon, next_wpt['lat'], next_wpt['lon']
                     )
+                    if outbound_distance > 1000.0:
+                        outbound_course = None
 
             area_code, icao_code = derive_area_icao(lat, lon)
             wpt_ref_table = 'EA'  # Enroute waypoint
@@ -266,26 +285,24 @@ def convert_airways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
                 99999, 6000, None,
                 outbound_course, None,
                 airway_ident, route_type, seqno,
-                None, ident, lat, lon, wpt_ref_table,
+                'E   ', ident, lat, lon, wpt_ref_table,
             ))
+            previous_point = (lat, lon)
 
         if has_cn_point:
             for seg in segments:
-                # Check if already exists.
-                # seg tuple layout: (area_code0, 'XX'1, None2, level3, icao_code4,
-                #   inbound_course5, inbound_dist6, 99999(7=max_alt), 6000(8=min_alt), None9,
-                #   outbound_course10, None11, airway_ident12, route_type13, seqno14,
-                #   None15(=waypoint_description_code), ident16, lat17, lon18, wpt_ref_table19)
-                # NOTE: must dedup on seg[16] (the actual waypoint identifier),
-                # not seg[15] (always None) — using index 15 made the dedup key
-                # (route, seqno, None) which never matches the real
-                # (route_identifier, seqno, waypoint_identifier) rows already in
-                # the destination table, causing every re-run to duplicate all
-                # Chinese airway segments.
-                dedup_key = (seg[12], seg[14], seg[16])  # route, seqno, wpt_ident
-                if dedup_key not in existing_airways:
-                    new_rows.append(seg)
-                    existing_airways.add(dedup_key)
+                point_key = (seg[12], seg[16])
+                existing_coordinates = existing_airways.get(point_key, ())
+                if any(
+                    lat is not None and lon is not None
+                    and compute_course_and_distance(
+                        seg[17], seg[18], lat, lon
+                    )[1] < 5.0
+                    for lat, lon in existing_coordinates
+                ):
+                    continue
+                new_rows.append(seg)
+                existing_airways[point_key].append((seg[17], seg[18]))
             total_segments += len(segments)
 
     # Reorder to match column order

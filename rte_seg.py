@@ -29,52 +29,39 @@ def parse_dms(coord_str: str) -> float | None:
     if not coord_str or not coord_str.strip():
         return None
 
-    coord_str = coord_str.strip()
-
-    # First character is direction
-    direction = coord_str[0].upper()
-    numeric = coord_str[1:]
-
+    value = coord_str.strip().upper()
+    direction = value[0]
     if direction in ('N', 'S', 'E', 'W'):
+        numeric = value[1:]
+        degree_digits = 2 if direction in ('N', 'S') else 3
+        limit = 90 if direction in ('N', 'S') else 180
         sign = -1 if direction in ('S', 'W') else 1
     else:
-        # No direction prefix
-        numeric = coord_str
+        numeric = value
+        whole = numeric.partition('.')[0]
+        degree_digits = len(whole) - 4
+        limit = 180
         sign = 1
 
-    try:
-        # Parse as float, then extract degrees/minutes/seconds
-        val = float(numeric)
-        # Format: DDMMSS.ss
-        # E.g., 404250.00 → 40° 42' 50.00"
-        # But could also be DDDMMSS.ss
-        # Split integer part to get DMS components
-        int_part = int(val)
-        frac_part = val - int_part
-
-        if len(str(int_part)) <= 4:
-            # Format: DDMM → degrees (2) + minutes (2)
-            deg = int_part // 100
-            minutes = int_part % 100
-            sec = frac_part * 60
-        elif len(str(int_part)) <= 6:
-            # Format: DDDMM → degrees (3) + minutes (2)
-            deg = int_part // 100
-            minutes = int_part % 100
-            sec = frac_part * 60
-        else:
-            # Format: DDMMSS.ss → degrees (2) + minutes (2) + seconds (2+)
-            str_val = str(int_part).zfill(6)
-            deg = int(str_val[:2]) if len(str_val) <= 6 else int(str_val[:3])
-            minutes_start = 2 if len(str_val) <= 6 else 3
-            minutes = int(str_val[minutes_start:minutes_start + 2])
-            sec = (int(str_val[minutes_start + 2:]) if len(str_val) > minutes_start + 2
-                   else 0) + frac_part
-
-        decimal = sign * (deg + minutes / 60.0 + sec / 3600.0)
-        return decimal
-    except (ValueError, ZeroDivisionError):
+    whole, separator, fraction = numeric.partition('.')
+    if (degree_digits not in (2, 3)
+            or len(whole) != degree_digits + 4
+            or not whole.isdigit()
+            or (separator and not fraction.isdigit())):
         return None
+
+    degrees = int(whole[:degree_digits])
+    minutes = int(whole[degree_digits:degree_digits + 2])
+    seconds_text = whole[degree_digits + 2:]
+    if separator:
+        seconds_text += f'.{fraction}'
+    seconds = float(seconds_text)
+
+    if (minutes >= 60 or seconds >= 60 or degrees > limit
+            or (degrees == limit and (minutes or seconds))):
+        return None
+
+    return sign * (degrees + minutes / 60.0 + seconds / 3600.0)
 
 
 def parse_rte_seg(csv_path: str) -> list[dict]:
@@ -109,8 +96,8 @@ def parse_rte_seg(csv_path: str) -> list[dict]:
             end_lat = parse_dms(row.get('GEO_LAT_END_ACCURACY', ''))
             end_lon = parse_dms(row.get('GEO_LONG_END_ACCURACY', ''))
 
-            if not all([start_lat, start_lon, end_lat, end_lon,
-                        start_ident, end_ident]):
+            if (None in (start_lat, start_lon, end_lat, end_lon)
+                    or not start_ident or not end_ident):
                 skipped += 1
                 continue
 
@@ -282,18 +269,23 @@ def merge_rte_seg_to_airways(dst_conn: sqlite3.Connection,
         routes[rid].append(seg)
 
     # Get existing airway data for dedup
-    existing = set()
+    existing = defaultdict(list)
     for row in dst_conn.execute(
-        "SELECT route_identifier, seqno, waypoint_identifier FROM tbl_er_enroute_airways"
+        "SELECT route_identifier, waypoint_identifier, waypoint_latitude, "
+        "waypoint_longitude FROM tbl_er_enroute_airways"
     ):
-        existing.add((row['route_identifier'], row['seqno'],
-                      row['waypoint_identifier']))
+        existing[(row['route_identifier'], row['waypoint_identifier'])].append(
+            (row['waypoint_latitude'], row['waypoint_longitude'])
+        )
 
     # Generate rows
     new_rows = []
-    total_segments = 0
+    unrepresentable_routes = 0
 
     for route_ident, segs in routes.items():
+        if len(route_ident) > 5:
+            unrepresentable_routes += 1
+            continue
         # Sort segments to build sequence
         # Use a simple approach: chain segments where end of one is start of next
         sorted_segs = _build_route_sequence(segs)
@@ -323,8 +315,16 @@ def merge_rte_seg_to_airways(dst_conn: sqlite3.Connection,
             outbound_course = seg.get('valid_track') or seg.get('mag_track')
             inbound_dist = compute_distance(start_lat, start_lon, end_lat, end_lon)
 
-            dedup_key = (route_ident, seqno, seg['start_ident'])
-            if dedup_key in existing:
+            if len(seg['start_ident']) > 5:
+                continue
+
+            point_key = (route_ident, seg['start_ident'])
+            existing_coordinates = existing.get(point_key, ())
+            if any(
+                lat is not None and lon is not None
+                and _haversine_nm(start_lat, start_lon, lat, lon) < 5.0
+                for lat, lon in existing_coordinates
+            ):
                 continue
 
             new_rows.append((
@@ -343,21 +343,23 @@ def merge_rte_seg_to_airways(dst_conn: sqlite3.Connection,
                 route_ident,                            # route_identifier
                 route_type,                             # route_type
                 seqno,                                  # seqno
-                None,                                   # waypoint_description_code
+                'E   ',                                 # waypoint_description_code
                 seg['start_ident'],                     # waypoint_identifier
                 start_lat,                              # waypoint_latitude
                 start_lon,                              # waypoint_longitude
                 seg.get('start_ref', 'EA'),             # waypoint_ref_table
             ))
-            existing.add(dedup_key)
-
-            # Also add the end point if it's the last segment
-            total_segments += 1
+            existing[point_key].append((start_lat, start_lon))
 
     from db_utils import batch_insert  # type: ignore[import-untyped]
     from tables.airways import TBL_ER_COLUMNS  # type: ignore[import-untyped]
 
     print(f"  RTE_SEG airway segments to insert: {len(new_rows)}")
+    if unrepresentable_routes:
+        print(
+            "  目标格式无法表示的超长航路名: "
+            f"{unrepresentable_routes}"
+        )
 
     if new_rows:
         batch_insert(dst_conn, 'tbl_er_enroute_airways',
