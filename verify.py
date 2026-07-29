@@ -18,6 +18,8 @@ import json
 import re
 from pathlib import Path
 
+from tables.toliss import count_runway_order_violations, is_toliss_target
+
 
 CN_LAT_MIN, CN_LAT_MAX = 15.0, 55.0
 CN_LON_MIN, CN_LON_MAX = 70.0, 140.0
@@ -39,6 +41,8 @@ def verify_all(db_path: str, source_path: str | None = None) -> bool:
     all_ok &= check_frequency_ranges(conn)
     all_ok &= check_coordinate_ranges(conn)
     all_ok &= check_referential_integrity(conn)
+    if is_toliss_target(conn):
+        all_ok &= check_toliss_loader_compatibility(conn)
     if source_path:
         all_ok &= check_source_procedure_completeness(conn, source_path)
     all_ok &= spot_check_airport(conn, 'ZBAA', 'BEIJING')
@@ -51,6 +55,72 @@ def verify_all(db_path: str, source_path: str | None = None) -> bool:
 
     conn.close()
     return all_ok
+
+
+def check_toliss_loader_compatibility(conn) -> bool:
+    """Check constraints imposed by the AS346 fixed-memory SQL loader."""
+    print("\n--- ToLiss / AS346 加载兼容性检查 ---")
+    checks = (
+        (
+            "NDB 磁偏角为空",
+            "SELECT COUNT(1) FROM tbl_db_enroute_ndbnavaids "
+            "WHERE magnetic_variation IS NULL",
+        ),
+        (
+            "航路点标识超过 5 个字符",
+            "SELECT COUNT(1) FROM tbl_ea_enroute_waypoints "
+            "WHERE waypoint_identifier IS NULL "
+            "OR length(waypoint_identifier) > 5",
+        ),
+        (
+            "航路固定字段或距离无效",
+            "SELECT COUNT(1) FROM tbl_er_enroute_airways "
+            "WHERE route_identifier IS NULL "
+            "OR length(route_identifier) > 5 "
+            "OR waypoint_identifier IS NULL "
+            "OR length(waypoint_identifier) > 5 "
+            "OR waypoint_description_code IS NULL "
+            "OR length(waypoint_description_code) <> 4 "
+            "OR inbound_course IS NULL "
+            "OR inbound_distance IS NULL "
+            "OR outbound_course IS NULL "
+            "OR inbound_distance < 0.0 "
+            "OR inbound_distance > 1000.0",
+        ),
+    )
+    ok = True
+    for label, query in checks:
+        count = conn.execute(query).fetchone()[0]
+        if count:
+            print(f"  [FAIL] {label}: {count}")
+            ok = False
+        else:
+            print(f"  [OK] {label}: 0")
+    runway_order_violations = count_runway_order_violations(conn)
+    if runway_order_violations:
+        print(
+            "  [FAIL] AS346 跑道扫描顺序倒序: "
+            f"{runway_order_violations}"
+        )
+        ok = False
+    else:
+        print("  [OK] AS346 跑道扫描顺序倒序: 0")
+    invalid_rf_legs = 0
+    for table in ("tbl_pd_sids", "tbl_pe_stars", "tbl_pf_iaps"):
+        invalid_rf_legs += conn.execute(
+            f"""
+            SELECT COUNT(1)
+            FROM {table}
+            WHERE path_termination = 'RF'
+              AND (arc_radius IS NULL OR arc_radius <= 0.0)
+            """
+        ).fetchone()[0]
+    if invalid_rf_legs:
+        print(f"  [FAIL] RF 航段半径无效: {invalid_rf_legs}")
+        ok = False
+    else:
+        print("  [OK] RF 航段半径无效: 0")
+    return ok
 
 
 def check_runtime_compatibility(conn, db_path: str) -> bool:
@@ -310,28 +380,35 @@ def check_source_procedure_completeness(conn, source_path: str) -> bool:
     ]
     try:
         for proc, table, label in mappings:
-            expected_rows, expected_airports = source.execute(
+            source_rows = source.execute(
                 f"""
-                SELECT COUNT(*), COUNT(DISTINCT a.ICAO)
+                SELECT a.ICAO AS airport_identifier, l.*
                 FROM TerminalLegs l
                 JOIN Terminals t ON t.ID=l.TerminalID
                 JOIN Airports a ON a.ID=t.AirportID
                 WHERE ({airport_filter}) AND CAST(t.Proc AS TEXT)=?
+                ORDER BY l.TerminalID, l.ID
                 """,
                 (proc,),
-            ).fetchone()
-            source_airports = [
-                row[0] for row in source.execute(
-                    f"""
-                    SELECT DISTINCT a.ICAO
-                    FROM TerminalLegs l
-                    JOIN Terminals t ON t.ID=l.TerminalID
-                    JOIN Airports a ON a.ID=t.AirportID
-                    WHERE ({airport_filter}) AND CAST(t.Proc AS TEXT)=?
-                    """,
-                    (proc,),
+            )
+            expected_rows = 0
+            source_airports = set()
+            previous_by_section = {}
+            for row in source_rows:
+                source_airports.add(row["airport_identifier"])
+                section = (
+                    row["TerminalID"], row["Type"], row["Transition"]
                 )
-            ]
+                signature = tuple(
+                    row[key]
+                    for key in row.keys()
+                    if key not in {"airport_identifier", "ID"}
+                )
+                if previous_by_section.get(section) != signature:
+                    expected_rows += 1
+                previous_by_section[section] = signature
+            expected_airports = len(source_airports)
+            source_airports = sorted(source_airports)
             placeholders = ','.join('?' for _ in source_airports)
             actual_rows, actual_airports = conn.execute(
                 f"""

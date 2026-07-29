@@ -41,6 +41,7 @@ from tables.rest import (
     convert_grid_mora, convert_airport_comm
 )
 from tables.empty_tables import create_empty_tables
+from tables.toliss import is_toliss_target, sanitize_toliss_data
 from rte_seg import parse_rte_seg, resolve_coordinates, merge_rte_seg_to_airways
 from region_lookup import RegionLookup
 from deployment import find_package_layout, update_package_layout
@@ -330,6 +331,18 @@ def run_conversion(
         # === Phase 9 ===
         advance("Phase 9: Empty Tables & Schema")
         create_empty_tables(dst_conn, working_path)
+
+        if is_toliss_target(dst_conn):
+            log()
+            log("=== ToLiss / AS346 Compatibility ===")
+            toliss_stats = sanitize_toliss_data(dst_conn)
+            log(
+                "  ToLiss 兼容清洗: "
+                f"补齐 {toliss_stats['ndb_magvar_defaulted']} 个 NDB 磁偏角，"
+                f"移除 {toliss_stats['waypoints_removed']} 个超长航路点，"
+                f"移除 {toliss_stats['airways_removed']} 条无效航路记录，"
+                f"重排 {toliss_stats['runways_reordered']} 条跑道记录"
+            )
 
         # --- Post-conversion ---
         report_changes(dst_conn, "AFTER")

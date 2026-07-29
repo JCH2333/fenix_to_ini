@@ -11,6 +11,7 @@ This is the most complex conversion:
 
 import sys
 import os
+import math
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
@@ -75,6 +76,9 @@ TBL_PF_COLUMNS = TBL_PD_COLUMNS + [
     'lnav_vnav_authorized_sbas',    # VARCHAR(1)
     'lnav_vnav_level_service_name', # VARCHAR(1)
 ]
+
+WAYPOINT_LATITUDE_INDEX = TBL_PD_COLUMNS.index('waypoint_latitude')
+WAYPOINT_LONGITUDE_INDEX = TBL_PD_COLUMNS.index('waypoint_longitude')
 
 
 def normalize_runway(rwy: str) -> str:
@@ -181,8 +185,18 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
             route_type = derive_route_type(proc, leg['Type'], transition, proc_ident)
             sections[(route_type, transition)].append(leg)
 
+        section_endpoints = []
         for (route_type, transition), section_legs in sections.items():
             section_legs.sort(key=lambda leg: leg['ID'])
+            section_legs = _deduplicate_section_legs(section_legs)
+            first_path_term = map_path_terminator(
+                (section_legs[0]['TrackCode'] or '').strip() or 'IF'
+            )
+            previous_waypoint_coords = None
+            if first_path_term == 'RF':
+                previous_waypoint_coords = _shared_section_endpoint(
+                    section_endpoints
+                )
 
             # Generate seqno
             for i, leg in enumerate(section_legs):
@@ -191,8 +205,14 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                 row = _build_procedure_row(
                     leg, icao, proc_ident, transition, rwy, route_type,
                     seqno, waypoint_lookup, navaid_lookup,
-                    legs_ex.get(leg['ID'])
+                    legs_ex.get(leg['ID']), previous_waypoint_coords
                 )
+                current_waypoint_coords = (
+                    row[WAYPOINT_LATITUDE_INDEX],
+                    row[WAYPOINT_LONGITUDE_INDEX],
+                )
+                if _valid_coordinates(current_waypoint_coords):
+                    previous_waypoint_coords = current_waypoint_coords
 
                 if table_name == 'tbl_pd_sids':
                     sid_rows.append(row)
@@ -209,6 +229,9 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                     iap_extra = ('N', None, None, None, None, None)
                     iap_rows.append(row + iap_extra)
                     stats['iap'] += 1
+
+            if _valid_coordinates(previous_waypoint_coords):
+                section_endpoints.append(previous_waypoint_coords)
 
     replaced = _delete_airport_procedures(dst_conn, covered_airports)
 
@@ -255,6 +278,36 @@ def normalize_transition(transition: str | None, runway: str) -> str | None:
     return value
 
 
+def _deduplicate_section_legs(section_legs):
+    """Remove exact consecutive duplicates found in some Fenix procedures."""
+    result = []
+    previous_signature = None
+    for leg in section_legs:
+        signature = tuple(leg[key] for key in leg.keys() if key != 'ID')
+        if signature != previous_signature:
+            result.append(leg)
+        previous_signature = signature
+    return result
+
+
+def _shared_section_endpoint(section_endpoints):
+    """Return the endpoint shared by all preceding transition sections."""
+    if not section_endpoints:
+        return None
+    first = section_endpoints[0]
+    if all(endpoint == first for endpoint in section_endpoints[1:]):
+        return first
+    return None
+
+
+def _valid_coordinates(coordinates):
+    return bool(
+        coordinates
+        and all(value is not None and math.isfinite(value)
+                for value in coordinates)
+    )
+
+
 def derive_route_type(proc: str, fenix_type: str | None,
                       transition: str | None, proc_ident: str) -> str:
     """Map Fenix TerminalLegs.Type to the DFDv2 route_type."""
@@ -291,7 +344,10 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
                          transition: str | None, runway: str, route_type: str,
                          seqno: int,
                          waypoint_lookup: dict, navaid_lookup: dict,
-                         leg_ex: dict | None) -> tuple:
+                         leg_ex: dict | None,
+                         previous_waypoint_coords: tuple[float | None,
+                                                         float | None] | None
+                         ) -> tuple:
     """Build a single procedure row from a TerminalLeg."""
 
     # Resolve waypoint
@@ -377,8 +433,20 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     # VNAV
     vnav = leg['Vnav'] if leg['Vnav'] and leg['Vnav'] != 0 else None
 
-    # Arc radius (for AF legs)
+    # Arc geometry. ToLiss does not read the center-waypoint columns for RF
+    # legs, so radius and travelled arc distance must be populated explicitly.
     arc_radius = leg['NavDist'] if path_term == 'AF' and leg['NavDist'] else None
+    route_distance_type = None
+    if path_term == 'RF':
+        rf_geometry = _derive_rf_geometry(
+            previous_waypoint_coords,
+            (wpt_lat, wpt_lon),
+            (center_lat, center_lon),
+            turn_dir,
+        )
+        if rf_geometry:
+            arc_radius, dist_time, turn_dir = rf_geometry
+            route_distance_type = 'D'
 
     # RNP from waypoint description code
     rnp = None
@@ -415,7 +483,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
         nav_ident,                      # recommended_navaid
         None,                           # rho
         rnp,                            # rnp
-        None,                           # route_distance_holding_distance_time
+        route_distance_type,            # route_distance_holding_distance_time
         route_type,                     # route_type
         seqno,                          # seqno
         speed_limit_desc,               # speed_limit_description
@@ -434,3 +502,71 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     )
 
     return row
+
+
+def _derive_rf_geometry(previous_waypoint, waypoint, center, turn_direction):
+    """Return the ARINC RF radius and arc distance in nautical miles."""
+    if not previous_waypoint:
+        return None
+    coordinates = (*previous_waypoint, *waypoint, *center)
+    if any(value is None or not math.isfinite(value) for value in coordinates):
+        return None
+
+    previous_lat, previous_lon = previous_waypoint
+    waypoint_lat, waypoint_lon = waypoint
+    center_lat, center_lon = center
+    radius = _great_circle_distance_nm(
+        center_lat, center_lon, waypoint_lat, waypoint_lon
+    )
+    start_radius = _great_circle_distance_nm(
+        center_lat, center_lon, previous_lat, previous_lon
+    )
+    start_bearing = _initial_bearing(
+        center_lat, center_lon, previous_lat, previous_lon
+    )
+    end_bearing = _initial_bearing(
+        center_lat, center_lon, waypoint_lat, waypoint_lon
+    )
+    right_sweep = (end_bearing - start_bearing) % 360.0
+    left_sweep = (start_bearing - end_bearing) % 360.0
+    if turn_direction == 'R':
+        sweep = right_sweep
+    elif turn_direction == 'L':
+        sweep = left_sweep
+    elif right_sweep <= left_sweep:
+        turn_direction, sweep = 'R', right_sweep
+    else:
+        turn_direction, sweep = 'L', left_sweep
+    arc_distance = ((start_radius + radius) / 2.0) * math.radians(sweep)
+    if radius <= 0.0 or arc_distance <= 0.0:
+        return None
+    return round(radius, 2), round(arc_distance, 1), turn_direction
+
+
+def _great_circle_distance_nm(lat1, lon1, lat2, lon2):
+    """Calculate spherical great-circle distance in nautical miles."""
+    lat1_rad, lat2_rad = math.radians(lat1), math.radians(lat2)
+    delta_lat = math.radians(lat2 - lat1)
+    delta_lon = math.radians(lon2 - lon1)
+    haversine = (
+        math.sin(delta_lat / 2.0) ** 2
+        + math.cos(lat1_rad)
+        * math.cos(lat2_rad)
+        * math.sin(delta_lon / 2.0) ** 2
+    )
+    central_angle = 2.0 * math.asin(min(1.0, math.sqrt(haversine)))
+    return 3440.065 * central_angle
+
+
+def _initial_bearing(lat1, lon1, lat2, lon2):
+    """Calculate the clockwise initial bearing in degrees."""
+    lat1_rad, lat2_rad = math.radians(lat1), math.radians(lat2)
+    delta_lon = math.radians(lon2 - lon1)
+    y = math.sin(delta_lon) * math.cos(lat2_rad)
+    x = (
+        math.cos(lat1_rad) * math.sin(lat2_rad)
+        - math.sin(lat1_rad)
+        * math.cos(lat2_rad)
+        * math.cos(delta_lon)
+    )
+    return math.degrees(math.atan2(y, x)) % 360.0

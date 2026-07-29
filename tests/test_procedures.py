@@ -181,6 +181,90 @@ class ProcedureConversionTests(unittest.TestCase):
             "N",
         )
 
+    def test_rf_leg_derives_radius_and_arc_distance_from_center(self):
+        self.src.execute(
+            "INSERT INTO Terminals VALUES (?,?,?,?,?,?,?,?,?)",
+            (40, 1, "3", "ZBAA", None, "R01", "01", None, None),
+        )
+        self.src.executemany(
+            "INSERT INTO TerminalLegs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (1, 40, "A", "START", "IF", None, 0.0, 1.0, None,
+                 None, None, None, None, None, None, None, None, None,
+                 None, None, None, "E   "),
+                (2, 40, "A", "START", "RF", None, 1.0, 0.0, "L",
+                 None, None, None, None, None, None, None, None, None,
+                 None, 0.0, 0.0, "E   "),
+                (3, 40, "A", "START", "RF", None, 1.0, 0.0, "L",
+                 None, None, None, None, None, None, None, None, None,
+                 None, 0.0, 0.0, "E   "),
+            ],
+        )
+
+        convert_procedures(
+            self.src, self.dst, {1: "ZBAA"}, {}, {}, {}
+        )
+
+        row = self.dst.execute(
+            """
+            SELECT route_distance_holding_distance_time, arc_radius,
+                   distance_time
+            FROM tbl_pf_iaps
+            WHERE airport_identifier='ZBAA' AND path_termination='RF'
+            """
+        ).fetchone()
+        self.assertEqual(row["route_distance_holding_distance_time"], "D")
+        self.assertAlmostEqual(row["arc_radius"], 60.04, places=2)
+        self.assertAlmostEqual(row["distance_time"], 94.3, places=1)
+        self.assertEqual(
+            self.dst.execute(
+                "SELECT COUNT(*) FROM tbl_pf_iaps "
+                "WHERE airport_identifier='ZBAA' AND path_termination='RF'"
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_rf_common_section_uses_shared_transition_endpoint(self):
+        self.src.execute(
+            "INSERT INTO Terminals VALUES (?,?,?,?,?,?,?,?,?)",
+            (50, 1, "2", "ZBAA", None, "ARC1D", "01", None, None),
+        )
+        self.src.executemany(
+            "INSERT INTO TerminalLegs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (1, 50, "4", "RW01", "IF", None, 0.0, 1.0, None,
+                 None, None, None, None, None, None, None, None, None,
+                 None, None, None, "E   "),
+                (2, 50, "4", "RW01", "RF", None, 1.0, 0.0, "L",
+                 None, None, None, None, None, None, None, None, None,
+                 None, 0.0, 0.0, "E   "),
+                (3, 50, "4", "RW02", "IF", None, 0.0, 1.0, None,
+                 None, None, None, None, None, None, None, None, None,
+                 None, None, None, "E   "),
+                (4, 50, "4", "RW02", "RF", None, 1.0, 0.0, "L",
+                 None, None, None, None, None, None, None, None, None,
+                 None, 0.0, 0.0, "E   "),
+                (5, 50, "5", "ALL", "RF", None, 0.0, -1.0, None,
+                 None, None, None, None, None, None, None, None, None,
+                 None, 0.0, 0.0, "E   "),
+            ],
+        )
+
+        convert_procedures(
+            self.src, self.dst, {1: "ZBAA"}, {}, {}, {}
+        )
+
+        row = self.dst.execute(
+            """
+            SELECT turn_direction, arc_radius, distance_time
+            FROM tbl_pd_sids
+            WHERE airport_identifier='ZBAA' AND route_type='5'
+            """
+        ).fetchone()
+        self.assertEqual(row["turn_direction"], "L")
+        self.assertAlmostEqual(row["arc_radius"], 60.04, places=2)
+        self.assertAlmostEqual(row["distance_time"], 94.3, places=1)
+
 
 if __name__ == "__main__":
     unittest.main()
