@@ -65,10 +65,14 @@ class HeaderConversionTests(unittest.TestCase):
 
         cycle_info = convert_header(source, target)
         row = target.execute(
-            "SELECT cycle, effective_fromto, revision FROM tbl_hdr_header"
+            "SELECT cycle, effective_fromto, parsed_at, revision "
+            "FROM tbl_hdr_header"
         ).fetchone()
 
-        self.assertEqual(tuple(row), ("2607", "0907050826", "002"))
+        self.assertEqual(
+            tuple(row),
+            ("2607", "0907050826", "2026-07-09 00:00:00Z", "002"),
+        )
         self.assertEqual(cycle_info["cycle"], "2607")
         self.assertEqual(cycle_info["revision"], "2")
 

@@ -4,7 +4,6 @@ Phase 0: Generate tbl_hdr_header from Fenix config table.
 
 import sqlite3
 import re
-from datetime import datetime, timezone
 
 
 # Fenix date format: DDMMMYY (e.g. '09JUL26')
@@ -67,16 +66,25 @@ def convert_header(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection):
           f"({start_raw} - {end_raw})")
     print(f"  Navigraph effective_fromto: {effective}")
 
-    now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')
+    deterministic_parsed_at = (
+        f"20{start_y}-{start_m}-{start_d} 00:00:00Z"
+    )
 
     # Check if header exists
-    existing = dst_conn.execute("SELECT COUNT(*) FROM tbl_hdr_header").fetchone()[0]
-    if existing > 0:
+    existing = dst_conn.execute(
+        "SELECT cycle, parsed_at FROM tbl_hdr_header LIMIT 1"
+    ).fetchone()
+    if existing:
+        parsed_at = (
+            existing[1]
+            if existing[0] == cycle and existing[1]
+            else deterministic_parsed_at
+        )
         print(f"  [tbl_hdr_header] updating existing row with cycle {cycle}")
         dst_conn.execute("""
             UPDATE tbl_hdr_header
             SET cycle = ?, effective_fromto = ?, parsed_at = ?, revision = ?
-        """, (cycle, effective, now_str, header_revision))
+        """, (cycle, effective, parsed_at, header_revision))
     else:
         dst_conn.execute("""
             INSERT INTO tbl_hdr_header
@@ -90,7 +98,7 @@ def convert_header(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection):
             '2.0.24.1017',
             'NG_FWDFD',
             effective,
-            now_str,
+            deterministic_parsed_at,
             header_revision
         ))
         print(f"  [tbl_hdr_header] created with cycle {cycle}")
