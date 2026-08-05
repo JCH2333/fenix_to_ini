@@ -147,6 +147,20 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
             'speed_limit_desc': row['SpeedLimitDescription'],
         }
 
+    ils_lookup = {}
+    for row in src_conn.execute("""
+        SELECT ID, Ident, Latitude, Longtitude
+        FROM ILSes
+    """):
+        ident = (row['Ident'] or '').strip()
+        if ident:
+            ils_lookup[row['ID']] = {
+                'ident': ident,
+                'lat': row['Latitude'],
+                'lon': row['Longtitude'],
+                'ref_table': 'PI',
+            }
+
     # Filter legs for Chinese terminals
     cn_legs = [leg for leg in all_legs if leg['TerminalID'] in cn_terminal_ids]
     print(f"  Fenix Chinese terminal legs: {len(cn_legs)}")
@@ -205,7 +219,8 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                 row = _build_procedure_row(
                     leg, icao, proc_ident, transition, rwy, route_type,
                     seqno, waypoint_lookup, navaid_lookup,
-                    legs_ex.get(leg['ID']), previous_waypoint_coords
+                    legs_ex.get(leg['ID']), previous_waypoint_coords,
+                    ils_lookup.get(terminal['IlsID']) if route_type == 'I' else None,
                 )
                 current_waypoint_coords = (
                     row[WAYPOINT_LATITUDE_INDEX],
@@ -344,10 +359,11 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
                          transition: str | None, runway: str, route_type: str,
                          seqno: int,
                          waypoint_lookup: dict, navaid_lookup: dict,
-                         leg_ex: dict | None,
-                         previous_waypoint_coords: tuple[float | None,
-                                                         float | None] | None
-                         ) -> tuple:
+                          leg_ex: dict | None,
+                          previous_waypoint_coords: tuple[float | None,
+                                                          float | None] | None,
+                          procedure_ils: dict | None = None,
+                          ) -> tuple:
     """Build a single procedure row from a TerminalLeg."""
 
     # Resolve waypoint
@@ -389,6 +405,12 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
             nav_lat = nav['lat'] if nav_lat is None or nav_lat == 0 else nav_lat
             nav_lon = nav['lon'] if nav_lon is None or nav_lon == 0 else nav_lon
             nav_ref = 'D '
+
+    if nav_ident is None and procedure_ils:
+        nav_ident = procedure_ils['ident']
+        nav_lat = procedure_ils['lat']
+        nav_lon = procedure_ils['lon']
+        nav_ref = procedure_ils['ref_table']
 
     # Resolve center waypoint (for RF legs)
     center_id = leg['CenterID']
@@ -437,7 +459,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     dist_time = leg['Distance'] if leg['Distance'] and leg['Distance'] != 0 else None
 
     # VNAV
-    vnav = leg['Vnav'] if leg['Vnav'] and leg['Vnav'] != 0 else None
+    vnav = -abs(leg['Vnav']) if leg['Vnav'] and leg['Vnav'] != 0 else None
 
     # Arc geometry. ToLiss does not read the center-waypoint columns for RF
     # legs, so radius and travelled arc distance must be populated explicitly.

@@ -34,6 +34,12 @@ class ProcedureConversionTests(unittest.TestCase):
                 ID INTEGER, IsFlyOver INTEGER, SpeedLimit INTEGER,
                 SpeedLimitDescription TEXT
             );
+            CREATE TABLE ILSes (
+                ID INTEGER, RunwayID INTEGER, Freq INTEGER, GsAngle REAL,
+                Latitude REAL, Longtitude REAL, Category TEXT, Ident TEXT,
+                LocCourse REAL, CrossingHeight TEXT, HasDme INTEGER,
+                Elevation INTEGER
+            );
             """
         )
         create_table(self.dst, "tbl_pd_sids", TBL_PD_COLUMNS)
@@ -181,6 +187,61 @@ class ProcedureConversionTests(unittest.TestCase):
             ).fetchone()),
             ("N", None),
         )
+
+    def test_ils_final_section_inherits_localizer_and_negative_vertical_angle(self):
+        self.src.execute(
+            "INSERT INTO ILSes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (4326, 42423, 17371136, 3.0, 32.0923, 120.9794,
+             "1", "INT", 4.0, "49", 1, 16),
+        )
+        self.src.execute(
+            "INSERT INTO Terminals VALUES (?,?,?,?,?,?,?,?,?)",
+            (20, 1, "3", "ZSNT", "I36-Z ILS 36", "I36-Z", "36",
+             42423, 4326),
+        )
+        self.src.executemany(
+            "INSERT INTO TerminalLegs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (1, 20, "I", "", "IF", 201, 31.8779, 120.9866, None,
+                 None, None, None, None, None, None, None, "02960A", None,
+                 None, None, None, "E  I"),
+                (2, 20, "I", "", "CF", 202, 31.9597, 120.9839, None,
+                 None, None, None, None, None, None, None, "01970", 3.0,
+                 None, None, None, "E  F"),
+                (3, 20, "I", "", "CF", None, 32.0588, 120.9806, None,
+                 None, None, None, None, None, None, None, "MAP", 3.0,
+                 None, None, None, "G  M"),
+            ],
+        )
+        waypoints = {
+            201: {"ident": "NT303", "lat": 31.8779, "lon": 120.9866,
+                  "name": "", "icao_code": "ZS", "ref_table": "PC"},
+            202: {"ident": "FI36", "lat": 31.9597, "lon": 120.9839,
+                  "name": "", "icao_code": "ZS", "ref_table": "PC"},
+        }
+
+        convert_procedures(
+            self.src, self.dst, {1: "ZSNT"}, {}, waypoints, {}
+        )
+
+        rows = self.dst.execute(
+            """
+            SELECT seqno, waypoint_identifier, recommended_navaid,
+                   recommended_navaid_ref_table,
+                   recommended_navaid_icao_code, vertical_angle
+            FROM tbl_pf_iaps
+            WHERE airport_identifier='ZSNT' AND route_type='I'
+            ORDER BY seqno
+            """
+        ).fetchall()
+        self.assertEqual([row["seqno"] for row in rows], [10, 20, 30])
+        self.assertEqual([row["waypoint_identifier"] for row in rows],
+                         ["NT303", "FI36", "RW36"])
+        self.assertTrue(all(row["recommended_navaid"] == "INT" for row in rows))
+        self.assertTrue(all(row["recommended_navaid_ref_table"] == "PI" for row in rows))
+        self.assertTrue(all(row["recommended_navaid_icao_code"] == "ZS" for row in rows))
+        self.assertEqual([row["vertical_angle"] for row in rows],
+                         [None, -3.0, -3.0])
 
     def test_normalizes_fixed_fields_and_dependent_icao_codes(self):
         self.src.execute(
