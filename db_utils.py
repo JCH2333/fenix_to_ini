@@ -166,6 +166,7 @@ def batch_merge_by_coordinates(
     latitude_column: str,
     longitude_column: str,
     tolerance: float = 0.001,
+    match_columns: list[str] | None = None,
 ):
     """Merge navigation points by identifier and nearby coordinates."""
     if not rows:
@@ -176,15 +177,22 @@ def batch_merge_by_coordinates(
     ident_index = columns.index(identifier_column)
     lat_index = columns.index(latitude_column)
     lon_index = columns.index(longitude_column)
+    match_columns = match_columns or []
+    match_indexes = [columns.index(column) for column in match_columns]
 
     existing = {}
+    selected_columns = ", ".join(
+        [identifier_column, latitude_column, longitude_column] + match_columns
+    )
     query = (
-        f"SELECT rowid, {identifier_column}, {latitude_column}, {longitude_column} "
+        f"SELECT rowid, {selected_columns} "
         f"FROM {table}"
     )
-    for rowid, ident, lat, lon in conn.execute(query):
+    for result in conn.execute(query):
+        rowid, ident, lat, lon, *match_values = result
         if ident and lat is not None and lon is not None:
-            existing.setdefault(str(ident).strip(), []).append((rowid, lat, lon))
+            key = (str(ident).strip(), *match_values)
+            existing.setdefault(key, []).append((rowid, lat, lon))
 
     used_rowids = set()
     updates = []
@@ -194,9 +202,10 @@ def batch_merge_by_coordinates(
         ident = str(row[ident_index] or '').strip()
         lat = row[lat_index]
         lon = row[lon_index]
+        key = (ident, *(row[index] for index in match_indexes))
         best = None
         if ident and lat is not None and lon is not None:
-            for candidate in existing.get(ident, []):
+            for candidate in existing.get(key, []):
                 rowid, old_lat, old_lon = candidate
                 if rowid in used_rowids:
                     continue

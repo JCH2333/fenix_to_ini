@@ -72,6 +72,16 @@ class WaypointConversionTests(unittest.TestCase):
                 (4, "CTR01", 0, "RF center", 29.45, 94.45, None),
             ],
         )
+        self.dst.execute(
+            "INSERT INTO tbl_ea_enroute_waypoints VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("EEU", "ASIA", "CHINA", None, "ZB", 0.2, "CNFIX",
+             40.0, 116.0, "OFFICIAL EA", "R  ", " B"),
+        )
+        self.dst.execute(
+            "INSERT INTO tbl_pc_terminal_waypoints VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("EEU", "ASIA", "CHINA", "WGE", "ZU", -0.1, "ZUNZ",
+             "TERM1", 29.4, 94.4, "OFFICIAL PC", "W Z"),
+        )
 
         waypoint_lookup, terminal_ids = convert_waypoints(
             self.src,
@@ -110,6 +120,27 @@ class WaypointConversionTests(unittest.TestCase):
         self.assertEqual(waypoint_lookup[4]["ref_table"], "PC")
         self.assertEqual(waypoint_lookup[2]["icao_code"], "ZU")
         self.assertEqual(waypoint_lookup[4]["icao_code"], "ZU")
+        ea_row = self.dst.execute(
+            "SELECT * FROM tbl_ea_enroute_waypoints "
+            "WHERE waypoint_identifier='CNFIX'"
+        ).fetchone()
+        self.assertEqual(ea_row["continent"], "ASIA")
+        self.assertEqual(ea_row["country"], "CHINA")
+        self.assertEqual(ea_row["magnetic_variation"], 0.2)
+        self.assertEqual(ea_row["waypoint_name"], "OFFICIAL EA")
+        self.assertEqual(ea_row["waypoint_type"], "R  ")
+        self.assertEqual(ea_row["waypoint_usage"], " B")
+        pc_rows = {
+            row["waypoint_identifier"]: row
+            for row in self.dst.execute(
+                "SELECT * FROM tbl_pc_terminal_waypoints"
+            )
+        }
+        self.assertEqual(pc_rows["TERM1"]["region_code"], "ZUNZ")
+        self.assertEqual(pc_rows["TERM1"]["waypoint_name"], "OFFICIAL PC")
+        self.assertEqual(pc_rows["TERM1"]["waypoint_type"], "W Z")
+        self.assertEqual(pc_rows["CTR01"]["region_code"], "ZUNZ")
+        self.assertEqual(pc_rows["CTR01"]["waypoint_type"], "W Z")
 
 
 if __name__ == "__main__":

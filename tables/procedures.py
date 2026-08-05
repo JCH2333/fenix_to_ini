@@ -208,6 +208,9 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                 )
             )
         )
+        uses_rnp_ar_runway_fix = (
+            is_rnp_ar and proc_ident.upper().startswith('R')
+        )
 
         # Each (route type, transition) pair is an independent DFD section.
         sections = defaultdict(list)
@@ -254,6 +257,7 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                         else None
                     ),
                     is_rnp_ar,
+                    uses_rnp_ar_runway_fix,
                     i == len(section_legs) - 1,
                     i == rnp_ar_faf_index,
                     vertical_overrides.get(leg['ID']),
@@ -400,6 +404,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
                                                           float | None] | None,
                           procedure_ils: dict | None = None,
                           is_rnp_ar: bool = False,
+                          uses_rnp_ar_runway_fix: bool = False,
                           is_last_in_section: bool = False,
                           is_rnp_ar_faf: bool = False,
                           vertical_angle_override: float | None = None,
@@ -429,7 +434,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
 
     if not wpt_ident and (leg['Alt'] or '').strip().upper() == 'MAP' and runway:
         wpt_ident = normalize_runway(runway)
-        wpt_ref_table = 'PG'
+        wpt_ref_table = 'PC' if uses_rnp_ar_runway_fix else 'PG'
 
     # Resolve recommended navaid
     nav_id = leg['NavID']
@@ -630,6 +635,8 @@ def _normalize_rnp_ar_description(raw_value, ref_table, is_last, is_faf):
     value = str(raw_value).strip().upper()
     if is_last and value == 'EE':
         return 'EE H'
+    if value == 'EE':
+        return 'E   '
     if value == 'EI':
         return 'E  I'
     if value == 'EF':
@@ -640,6 +647,8 @@ def _normalize_rnp_ar_description(raw_value, ref_table, is_last, is_faf):
         return 'E   '
     if value == 'E A':
         return 'E CA' if ref_table == 'EA' else 'E  A'
+    if ref_table == 'PC' and value in {'GY M', 'G  M', 'G M'}:
+        return 'EY M'
     return str(raw_value)[:4].ljust(4)
 
 

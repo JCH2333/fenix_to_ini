@@ -271,7 +271,10 @@ class ProcedureConversionTests(unittest.TestCase):
                 (4, 70, "0", None, "TF", None, 29.29586, 94.32253, None,
                  None, None, None, None, None, None, None, "MAP", 3.0,
                  None, None, None, "GY M"),
-                (5, 70, "0", None, "TF", 304, 29.40, 94.40, None,
+                (5, 70, "0", None, "TF", 305, 29.35, 94.35, None,
+                 None, None, None, None, None, None, None, None, None,
+                 None, None, None, "EE"),
+                (6, 70, "0", None, "TF", 304, 29.40, 94.40, None,
                  None, None, None, None, None, None, None, None, None,
                  None, None, None, "EE"),
             ],
@@ -286,6 +289,7 @@ class ProcedureConversionTests(unittest.TestCase):
                 (302, "LZ186", 29.20, 94.20),
                 (303, "LZ184", 29.25, 94.25),
                 (304, "LZ302", 29.40, 94.40),
+                (305, "LZ298", 29.35, 94.35),
                 (401, "LZC20", 29.22, 94.22),
             ]
         }
@@ -297,20 +301,22 @@ class ProcedureConversionTests(unittest.TestCase):
         rows = self.dst.execute(
             """
             SELECT seqno, waypoint_identifier, authorization_required, rnp,
-                   vertical_angle, waypoint_description_code
+                   vertical_angle, waypoint_description_code,
+                   waypoint_ref_table
             FROM tbl_pf_iaps
             WHERE airport_identifier='ZUNZ' AND procedure_identifier='R05'
             ORDER BY seqno
             """
         ).fetchall()
-        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(rows), 6)
         self.assertTrue(all(row["authorization_required"] == "Y" for row in rows))
         self.assertTrue(all(row["rnp"] == 0.3 for row in rows))
         self.assertEqual([row["vertical_angle"] for row in rows],
-                         [None, None, -3.0, -3.0, None])
+                         [None, None, -3.0, -3.0, None, None])
         self.assertEqual([row["waypoint_description_code"] for row in rows],
-                         ["E  I", "E  F", "E   ", "GY M", "EE H"])
+                         ["E  I", "E  F", "E   ", "EY M", "E   ", "EE H"])
         self.assertEqual(rows[3]["waypoint_identifier"], "RW05")
+        self.assertEqual(rows[3]["waypoint_ref_table"], "PC")
 
     def test_normalizes_fixed_fields_and_dependent_icao_codes(self):
         self.src.execute(

@@ -183,12 +183,15 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
             cn_airport_coords[row['ICAO']] = (row['Latitude'], row['Longtitude'])
 
     # Step 3: Get existing waypoints (for new vs. updated reporting)
-    existing_ea = set()
-    for row in dst_conn.execute("SELECT waypoint_identifier FROM tbl_ea_enroute_waypoints"):
-        existing_ea.add(row['waypoint_identifier'])
+    existing_ea_rows = {}
+    for row in dst_conn.execute("SELECT * FROM tbl_ea_enroute_waypoints"):
+        existing_ea_rows.setdefault(row['waypoint_identifier'], []).append(row)
+    existing_ea = set(existing_ea_rows)
 
+    existing_pc_rows = {}
     existing_pc = set()
-    for row in dst_conn.execute("SELECT waypoint_identifier, region_code FROM tbl_pc_terminal_waypoints"):
+    for row in dst_conn.execute("SELECT * FROM tbl_pc_terminal_waypoints"):
+        existing_pc_rows.setdefault(row['waypoint_identifier'], []).append(row)
         existing_pc.add((row['waypoint_identifier'], row['region_code']))
 
     # Step 4: Build rows for enroute and terminal waypoints
@@ -225,14 +228,28 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
             default=None,
         )
 
-        area_code, icao_code, region_code = derive_area_icao(lat, lon, ident, region_lookup, nearest_apt)
+        area_code, icao_code, region_code = derive_area_icao(
+            lat, lon, ident, region_lookup, nearest_apt
+        )
+        existing_ea_row = _find_existing_waypoint(
+            existing_ea_rows.get(ident, ()), lat, lon
+        )
+        pc_region_code = nearest_apt or region_code
+        existing_pc_row = _find_existing_waypoint(
+            existing_pc_rows.get(ident, ()), lat, lon, pc_region_code
+        )
+        effective_icao_code = icao_code
+        if wpt_id in enroute_waypoint_regions and existing_ea_row:
+            effective_icao_code = existing_ea_row['icao_code'] or icao_code
+        elif existing_pc_row:
+            effective_icao_code = existing_pc_row['icao_code'] or icao_code
         waypoint_lookup[wpt_id] = {
             'ident': ident,
             'lat': lat,
             'lon': lon,
             'name': w['Name'] or '',
             'navaid_id': w['NavaidID'],
-            'icao_code': icao_code,
+            'icao_code': effective_icao_code,
             'region_code': region_code,
             'ref_table': ('EA' if wpt_id in enroute_waypoint_regions else 'PC'),
         }
@@ -262,45 +279,35 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
                 ea_updated += 1
             else:
                 ea_new += 1
-            ea_rows.append((
-                area_code,        # area_code
-                None,             # continent
-                None,             # country
-                'WGE',            # datum_code
-                icao_code,        # icao_code
-                None,             # magnetic_variation
-                ident,            # waypoint_identifier
-                lat,              # waypoint_latitude
-                lon,              # waypoint_longitude
-                name,             # waypoint_name
-                wpt_type,         # waypoint_type
-                usage,            # waypoint_usage
-            ))
+            if existing_ea_row:
+                values = {column: existing_ea_row[column] for column in TBL_EA_COLUMNS}
+                values.update(waypoint_latitude=lat, waypoint_longitude=lon)
+                ea_rows.append(tuple(values[column] for column in TBL_EA_COLUMNS))
+            else:
+                ea_rows.append((
+                    area_code, 'ASIA', 'CHINA', None, icao_code, None,
+                    ident, lat, lon, name, 'W  ', usage,
+                ))
 
         # Terminal waypoints
         # Column order: area_code, continent, country, datum_code, icao_code,
         #               magnetic_variation, region_code, waypoint_identifier,
         #               waypoint_latitude, waypoint_longitude, waypoint_name, waypoint_type
         if is_terminal:
-            pc_key = (ident, region_code)
+            pc_key = (ident, pc_region_code)
             if pc_key in existing_pc:
                 pc_updated += 1
             else:
                 pc_new += 1
-            pc_rows.append((
-                area_code,        # area_code
-                None,             # continent
-                None,             # country
-                'WGE',            # datum_code
-                icao_code,        # icao_code
-                None,             # magnetic_variation
-                region_code,      # region_code
-                ident,            # waypoint_identifier
-                lat,              # waypoint_latitude
-                lon,              # waypoint_longitude
-                name,             # waypoint_name
-                wpt_type,         # waypoint_type
-            ))
+            if existing_pc_row:
+                values = {column: existing_pc_row[column] for column in TBL_PC_COLUMNS}
+                values.update(waypoint_latitude=lat, waypoint_longitude=lon)
+                pc_rows.append(tuple(values[column] for column in TBL_PC_COLUMNS))
+            else:
+                pc_rows.append((
+                    area_code, 'ASIA', 'CHINA', 'WGE', icao_code, None,
+                    pc_region_code, ident, lat, lon, name, 'W Z',
+                ))
 
     from db_utils import batch_merge_by_coordinates  # type: ignore[import-untyped]
     print(f"  航路点: 新增 {ea_new}, 更新 {ea_updated}")
@@ -313,6 +320,26 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
     batch_merge_by_coordinates(
         dst_conn, 'tbl_pc_terminal_waypoints', TBL_PC_COLUMNS, pc_rows,
         'waypoint_identifier', 'waypoint_latitude', 'waypoint_longitude',
+        match_columns=['region_code'],
     )
 
     return waypoint_lookup, terminal_wpt_ids
+
+
+def _find_existing_waypoint(rows, latitude, longitude,
+                            preferred_region=None, tolerance=0.001):
+    candidates = []
+    for row in rows:
+        old_lat = row['waypoint_latitude']
+        old_lon = row['waypoint_longitude']
+        if old_lat is None or old_lon is None:
+            continue
+        distance_sq = (latitude - old_lat) ** 2 + (longitude - old_lon) ** 2
+        if distance_sq <= tolerance * tolerance:
+            region_matches = (
+                preferred_region is not None
+                and 'region_code' in row.keys()
+                and row['region_code'] == preferred_region
+            )
+            candidates.append((not region_matches, distance_sq, row))
+    return min(candidates, default=(None, None, None), key=lambda item: item[:2])[2]
