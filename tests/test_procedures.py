@@ -259,6 +259,18 @@ class ProcedureConversionTests(unittest.TestCase):
                          [None, -3.0, -3.0, None])
 
     def test_rnp_ar_semantics_cover_final_and_missed_approach(self):
+        self._insert(
+            "tbl_pc_terminal_waypoints",
+            TBL_PC_COLUMNS,
+            {
+                "area_code": "EEU", "continent": "ASIA", "country": "CHINA",
+                "datum_code": "WGE", "icao_code": "ZU",
+                "magnetic_variation": None, "region_code": "ZUNZ",
+                "waypoint_identifier": "RW05", "waypoint_latitude": 29.29,
+                "waypoint_longitude": 94.32, "waypoint_name": "RW05",
+                "waypoint_type": "W Z",
+            },
+        )
         self.src.execute(
             "INSERT INTO Terminals VALUES (?,?,?,?,?,?,?,?,?)",
             (70, 1, "3", "ZUNZ", "R05", "R05", "05", 42781, 0),

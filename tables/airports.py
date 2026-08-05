@@ -12,7 +12,9 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 import sqlite3
-from mappings import is_cn_airport  # type: ignore[import-untyped]
+from mappings import (  # type: ignore[import-untyped]
+    get_airport_icao_code, is_cn_airport,
+)
 from db_utils import batch_upsert  # type: ignore[import-untyped]
 
 
@@ -93,7 +95,7 @@ def convert_airports(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection)
         # Determine area_code: use 'EEU' for Chinese airspace (matches existing data)
         # icao_code is first 2 chars of ICAO
         area_code = 'EEU'
-        icao_code = icao[:2]
+        icao_code = get_airport_icao_code(icao)
 
         # Airport type: 'C' = civil (default)
         airport_type = 'C'

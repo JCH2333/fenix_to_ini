@@ -19,7 +19,7 @@ if _parent_dir not in sys.path:
 import sqlite3
 from collections import defaultdict
 from mappings import (  # type: ignore[import-untyped]
-    PROC_TO_TABLE, map_path_terminator, parse_altitude
+    PROC_TO_TABLE, get_airport_icao_code, map_path_terminator, parse_altitude
 )
 
 
@@ -206,7 +206,12 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         covered_airports[table_name].add(icao)
         proc_ident = (terminal['Name'] or '').strip()[:6]
         rwy = normalize_runway(terminal['Rwy'] or '')
-        procedure_icao_code = airport_region_codes.get(icao, icao[:2])
+        mapped_airport_code = get_airport_icao_code(icao)
+        procedure_icao_code = (
+            mapped_airport_code
+            if mapped_airport_code != icao[:2]
+            else airport_region_codes.get(icao, mapped_airport_code)
+        )
         has_rf = any(
             map_path_terminator((leg['TrackCode'] or '').strip()) == 'RF'
             for leg in legs
@@ -643,7 +648,7 @@ def _merge_rnp_ar_runway_points(dst_conn, points):
         seen.add(key)
         existing = dst_conn.execute(
             """
-            SELECT * FROM tbl_pc_terminal_waypoints
+            SELECT rowid AS merge_rowid, * FROM tbl_pc_terminal_waypoints
             WHERE region_code=? AND waypoint_identifier=?
             ORDER BY ABS(waypoint_latitude-?) + ABS(waypoint_longitude-?)
             LIMIT 1
@@ -652,6 +657,22 @@ def _merge_rnp_ar_runway_points(dst_conn, points):
         ).fetchone()
         if existing:
             values = {column: existing[column] for column in TBL_PC_COLUMNS}
+            values.update(
+                icao_code=point['icao_code'],
+                waypoint_latitude=latitude,
+                waypoint_longitude=longitude,
+            )
+            dst_conn.execute(
+                """
+                UPDATE tbl_pc_terminal_waypoints
+                SET icao_code=?, waypoint_latitude=?, waypoint_longitude=?
+                WHERE rowid=?
+                """,
+                (
+                    point['icao_code'], latitude, longitude,
+                    existing['merge_rowid'],
+                ),
+            )
         else:
             values = {
                 'area_code': 'EEU',

@@ -18,11 +18,21 @@ import json
 import re
 from pathlib import Path
 
+from mappings import CN_ICAO_PREFIXES, CN_SPECIAL_AIRPORTS
 from tables.toliss import count_runway_order_violations, is_toliss_target
 
 
 CN_LAT_MIN, CN_LAT_MAX = 15.0, 55.0
 CN_LON_MIN, CN_LON_MAX = 70.0, 140.0
+
+
+def _cn_airport_sql(column: str = "airport_identifier") -> str:
+    prefixes = ",".join(f"'{prefix}'" for prefix in CN_ICAO_PREFIXES)
+    specials = ",".join(f"'{airport}'" for airport in CN_SPECIAL_AIRPORTS)
+    return (
+        f"(SUBSTR({column},1,2) IN ({prefixes}) "
+        f"OR {column} IN ({specials}))"
+    )
 
 
 def verify_all(db_path: str, source_path: str | None = None) -> bool:
@@ -165,10 +175,7 @@ def check_inibuilds_procedure_semantics(conn) -> bool:
     """Validate procedure contracts observed in working iniBuilds data."""
     print("\n--- iniBuilds 程序语义检查 ---")
     ok = True
-    china_filter = (
-        "(airport_identifier LIKE 'Z%' "
-        "OR airport_identifier IN ('VHHX','OPGT'))"
-    )
+    china_filter = _cn_airport_sql()
 
     positive_angles = conn.execute(
         "SELECT COUNT(*) FROM tbl_pf_iaps "
@@ -181,12 +188,11 @@ def check_inibuilds_procedure_semantics(conn) -> bool:
         print("  [OK] 进近垂直角方向")
 
     partial_ar = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM (
             SELECT airport_identifier, procedure_identifier
             FROM tbl_pf_iaps
-            WHERE airport_identifier LIKE 'Z%'
-               OR airport_identifier IN ('VHHX','OPGT')
+            WHERE {china_filter}
             GROUP BY airport_identifier, procedure_identifier
             HAVING SUM(CASE WHEN authorization_required = 'Y' THEN 1 ELSE 0 END) > 0
                AND SUM(CASE WHEN authorization_required IS NOT 'Y' THEN 1 ELSE 0 END) > 0

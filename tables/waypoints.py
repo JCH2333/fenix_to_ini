@@ -12,6 +12,7 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 import sqlite3
+from mappings import get_airport_icao_code  # type: ignore[import-untyped]
 from region_lookup import RegionLookup  # type: ignore[import-untyped]
 
 
@@ -232,7 +233,7 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
             lat, lon, ident, region_lookup, nearest_apt
         )
         if owner_airports and nearest_apt:
-            icao_code = nearest_apt[:2]
+            icao_code = get_airport_icao_code(nearest_apt)
             region_code = icao_code
         existing_ea_row = _find_existing_waypoint(
             existing_ea_rows.get(ident, ()), lat, lon
@@ -245,7 +246,10 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
         if wpt_id in enroute_waypoint_regions and existing_ea_row:
             effective_icao_code = existing_ea_row['icao_code'] or icao_code
         elif existing_pc_row:
-            effective_icao_code = existing_pc_row['icao_code'] or icao_code
+            effective_icao_code = (
+                icao_code if owner_airports
+                else existing_pc_row['icao_code'] or icao_code
+            )
         waypoint_lookup[wpt_id] = {
             'ident': ident,
             'lat': lat,
@@ -304,7 +308,11 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
                 pc_new += 1
             if existing_pc_row:
                 values = {column: existing_pc_row[column] for column in TBL_PC_COLUMNS}
-                values.update(waypoint_latitude=lat, waypoint_longitude=lon)
+                values.update(
+                    icao_code=icao_code,
+                    waypoint_latitude=lat,
+                    waypoint_longitude=lon,
+                )
                 pc_rows.append(tuple(values[column] for column in TBL_PC_COLUMNS))
             else:
                 pc_rows.append((

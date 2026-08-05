@@ -117,6 +117,18 @@ class IniBuildsProcedureVerificationTests(unittest.TestCase):
         )
         self.assertFalse(check_inibuilds_procedure_semantics(self.conn))
 
+    def test_ignores_non_chinese_z_prefix_airports(self):
+        self._insert_iap(
+            airport_identifier="ZKPY",
+            authorization_required=None,
+            waypoint_identifier="MISSING",
+            waypoint_icao_code="ZK",
+            waypoint_latitude=39.0,
+            waypoint_longitude=125.0,
+            vertical_angle=3.0,
+        )
+        self.assertTrue(check_inibuilds_procedure_semantics(self.conn))
+
 
 if __name__ == "__main__":
     unittest.main()

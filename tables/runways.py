@@ -11,7 +11,7 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 import sqlite3
-from mappings import map_surface  # type: ignore[import-untyped]
+from mappings import get_airport_icao_code, map_surface  # type: ignore[import-untyped]
 from db_utils import batch_upsert  # type: ignore[import-untyped]
 from geomag import get_magnetic_declination, apply_magnetic_variation  # type: ignore[import-untyped]
 
@@ -142,7 +142,7 @@ def convert_runways(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection,
 
         # Area code and ICAO code
         area_code = 'EEU'
-        icao_code = icao[:2]
+        icao_code = get_airport_icao_code(icao)
 
         row_data = (
             icao,                    # airport_identifier

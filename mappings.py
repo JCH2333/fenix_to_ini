@@ -7,12 +7,29 @@ Constants, mappings, and enumerations for Fenix → iniBuilds conversion.
 CN_ICAO_PREFIXES = ('ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW', 'ZY')
 CN_SPECIAL_AIRPORTS = ('OPGT', 'VHHX')  # Gilgit (Pakistan), Old Kai Tak (HK)
 
+# Some Chinese airports use an ARINC 424 ICAO region code that differs from
+# the first two characters of the airport identifier. These stable mappings
+# were cross-checked against the working iniBuilds 2604 reference database.
+AIRPORT_ICAO_CODE_OVERRIDES = {
+    'ZBAL': 'ZL', 'ZBAR': 'ZL', 'ZBCF': 'ZY', 'ZBEN': 'ZL',
+    'ZBES': 'ZY', 'ZBHZ': 'ZY', 'ZBLA': 'ZY', 'ZBMZ': 'ZY',
+    'ZBTL': 'ZY', 'ZBUH': 'ZL', 'ZBUL': 'ZY', 'ZBZL': 'ZY',
+    'ZSFY': 'ZH', 'ZUAL': 'ZW', 'ZUJZ': 'ZP', 'ZULB': 'ZG',
+    'ZUNP': 'ZG', 'ZUPL': 'ZW', 'ZUWS': 'ZH', 'ZUYI': 'ZP',
+    'ZUZH': 'ZP',
+}
+
 
 def is_cn_airport(icao: str) -> bool:
     """Check if an ICAO code belongs to Chinese airspace."""
     if icao in CN_SPECIAL_AIRPORTS:
         return True
     return icao[:2] in CN_ICAO_PREFIXES
+
+
+def get_airport_icao_code(icao: str) -> str:
+    """Return the ARINC region code used by iniBuilds for an airport."""
+    return AIRPORT_ICAO_CODE_OVERRIDES.get(icao, icao[:2])
 
 
 # ---- Navaid Type Mapping ----

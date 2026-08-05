@@ -9,6 +9,8 @@ import csv
 import os
 from typing import Dict, Optional
 
+from mappings import get_airport_icao_code
+
 
 # FIR 中文名称到 ICAO 前缀的映射表
 FIR_TO_ICAO = {
@@ -147,7 +149,7 @@ class RegionLookup:
     def get_airport_icao(self, ident: str) -> Optional[str]:
         """获取机场的 ICAO 区域码（通常直接从 ICAO 码推断）。"""
         if len(ident) == 4 and ident[:2] in ('ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW', 'ZY'):
-            return ident[:2]
+            return get_airport_icao_code(ident)
         return self.airport_map.get(ident)
 
     def is_loaded(self) -> bool:
