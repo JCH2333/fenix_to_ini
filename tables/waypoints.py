@@ -126,15 +126,18 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
     ):
         cn_terminal_ids.add(row['ID'])
 
-    # Get waypoint IDs referenced by Chinese terminal legs
+    # Get endpoint and RF-center waypoint IDs referenced by Chinese terminals.
     terminal_wpt_ids = set()
     if cn_terminal_ids:
         placeholders = ','.join('?' for _ in cn_terminal_ids)
         for row in src_conn.execute(f"""
-            SELECT DISTINCT WptID FROM TerminalLegs
+            SELECT WptID AS WaypointID FROM TerminalLegs
             WHERE TerminalID IN ({placeholders}) AND WptID IS NOT NULL AND WptID > 0
-        """, list(cn_terminal_ids)):
-            terminal_wpt_ids.add(row['WptID'])
+            UNION
+            SELECT CenterID AS WaypointID FROM TerminalLegs
+            WHERE TerminalID IN ({placeholders}) AND CenterID IS NOT NULL AND CenterID > 0
+        """, list(cn_terminal_ids) * 2):
+            terminal_wpt_ids.add(row['WaypointID'])
 
     print(f"  Chinese terminal waypoints (from TerminalLegs): {len(terminal_wpt_ids)}")
 
@@ -162,17 +165,6 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
     print(f"  NAIP enroute waypoints: {len(enroute_waypoint_regions)}")
     print(f"  Selected Chinese waypoints: {len(selected_waypoints)}")
 
-    # Build waypoint lookup for downstream use
-    waypoint_lookup = {}
-    for w in selected_waypoints:
-        waypoint_lookup[w['ID']] = {
-            'ident': (w['Ident'] or '').strip(),
-            'lat': w['Latitude'] or 0.0,
-            'lon': w['Longtitude'] or 0.0,
-            'name': w['Name'] or '',
-            'navaid_id': w['NavaidID'],
-        }
-
     # Chinese airport coordinates for nearest-airport fallback
     cn_airport_coords = {}
     for row in src_conn.execute("SELECT ID, ICAO, Latitude, Longtitude FROM Airports"):
@@ -192,6 +184,7 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
     # Step 4: Build rows for enroute and terminal waypoints
     ea_rows = []
     pc_rows = []
+    waypoint_lookup = {}
     ea_new = 0
     ea_updated = 0
     pc_new = 0
@@ -215,6 +208,16 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
                 break
 
         area_code, icao_code, region_code = derive_area_icao(lat, lon, ident, region_lookup, nearest_apt)
+        waypoint_lookup[wpt_id] = {
+            'ident': ident,
+            'lat': lat,
+            'lon': lon,
+            'name': w['Name'] or '',
+            'navaid_id': w['NavaidID'],
+            'icao_code': icao_code,
+            'region_code': region_code,
+            'ref_table': ('EA' if wpt_id in enroute_waypoint_regions else 'PC'),
+        }
 
         # Determine waypoint type and usage
         collocated = w['Collocated']

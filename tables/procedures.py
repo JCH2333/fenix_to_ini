@@ -356,6 +356,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     wpt_lon = leg['WptLon']
     wpt_ident = None
     wpt_ref_table = None
+    waypoint_icao_code = None
 
     if wpt_id and wpt_id > 0:
         wpt = waypoint_lookup.get(wpt_id)
@@ -363,9 +364,12 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
             navaid_id = wpt.get('navaid_id')
             collocated_navaid = navaid_lookup.get(navaid_id) if navaid_id else None
             wpt_ident = collocated_navaid['ident'] if collocated_navaid else wpt['ident']
-            wpt_lat = wpt['lat'] if wpt_lat is None or wpt_lat == 0 else wpt_lat
-            wpt_lon = wpt['lon'] if wpt_lon is None or wpt_lon == 0 else wpt_lon
-            wpt_ref_table = 'D ' if collocated_navaid else 'PC'
+            wpt_lat = wpt['lat']
+            wpt_lon = wpt['lon']
+            wpt_ref_table = (
+                'D ' if collocated_navaid else wpt.get('ref_table', 'PC')
+            )
+            waypoint_icao_code = wpt.get('icao_code')
 
     if not wpt_ident and (leg['Alt'] or '').strip().upper() == 'MAP' and runway:
         wpt_ident = normalize_runway(runway)
@@ -392,14 +396,16 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     center_lat = leg['CenterLat']
     center_lon = leg['CenterLon']
     center_ref = None
+    center_icao_code = None
 
     if center_id and center_id > 0:
         wpt = waypoint_lookup.get(center_id)
         if wpt:
             center_ident = wpt['ident']
-            center_lat = wpt['lat'] if center_lat is None or center_lat == 0 else center_lat
-            center_lon = wpt['lon'] if center_lon is None or center_lon == 0 else center_lon
-            center_ref = 'PC'
+            center_lat = wpt['lat']
+            center_lon = wpt['lon']
+            center_ref = wpt.get('ref_table', 'PC')
+            center_icao_code = wpt.get('icao_code')
 
     # TrackCode is the ARINC path terminator. Type is the route section.
     track_code = (leg['TrackCode'] or '').strip()
@@ -461,9 +467,9 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
         except (ValueError, TypeError):
             pass
 
-    center_icao_code = icao_code if center_ident else None
+    center_icao_code = (center_icao_code or icao_code) if center_ident else None
     recommended_navaid_icao_code = icao_code if nav_ident else None
-    waypoint_icao_code = icao_code if wpt_ident else None
+    waypoint_icao_code = (waypoint_icao_code or icao_code) if wpt_ident else None
 
     row = (
         icao,                           # airport_identifier

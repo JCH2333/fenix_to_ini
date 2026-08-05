@@ -204,24 +204,29 @@ class ProcedureConversionTests(unittest.TestCase):
             self.dst,
             {1: "ZBAA"},
             {},
-            {101: {"ident": "FIX01", "lat": 40.0, "lon": 116.0,
-                   "name": ""}},
+            {101: {"ident": "FIX01", "lat": 39.9, "lon": 115.9,
+                   "name": "", "icao_code": "ZS", "region_code": "ZS",
+                   "ref_table": "EA"}},
             {},
         )
 
         rows = self.dst.execute(
             """
             SELECT waypoint_description_code, waypoint_identifier,
-                   waypoint_icao_code, recommended_navaid,
-                   recommended_navaid_icao_code, center_waypoint,
-                   center_waypoint_icao_code
+                    waypoint_icao_code, recommended_navaid,
+                    recommended_navaid_icao_code, center_waypoint,
+                    center_waypoint_icao_code, waypoint_latitude,
+                    waypoint_longitude, waypoint_ref_table
             FROM tbl_pd_sids
             WHERE airport_identifier='ZBAA'
             ORDER BY seqno
             """
         ).fetchall()
         self.assertEqual(rows[0]["waypoint_description_code"], "E   ")
-        self.assertEqual(rows[0]["waypoint_icao_code"], "ZB")
+        self.assertEqual(rows[0]["waypoint_icao_code"], "ZS")
+        self.assertEqual(rows[0]["waypoint_ref_table"], "EA")
+        self.assertEqual(rows[0]["waypoint_latitude"], 39.9)
+        self.assertEqual(rows[0]["waypoint_longitude"], 115.9)
         self.assertIsNone(rows[0]["recommended_navaid_icao_code"])
         self.assertIsNone(rows[0]["center_waypoint_icao_code"])
         self.assertIsNone(rows[1]["waypoint_identifier"])
@@ -239,22 +244,34 @@ class ProcedureConversionTests(unittest.TestCase):
                  None, None, None, None, None, None, None, None, None,
                  None, None, None, "E   "),
                 (2, 40, "A", "START", "RF", None, 1.0, 0.0, "L",
-                 None, None, None, None, None, None, None, None, None,
-                 None, 0.0, 0.0, "E   "),
+                  None, None, None, None, None, None, None, None, None,
+                  200, 0.0, 0.0, "E   "),
                 (3, 40, "A", "START", "RF", None, 1.0, 0.0, "L",
-                 None, None, None, None, None, None, None, None, None,
-                 None, 0.0, 0.0, "E   "),
+                  None, None, None, None, None, None, None, None, None,
+                  200, 0.0, 0.0, "E   "),
             ],
         )
 
         convert_procedures(
-            self.src, self.dst, {1: "ZBAA"}, {}, {}, {}
+            self.src,
+            self.dst,
+            {1: "ZBAA"},
+            {},
+            {
+                200: {
+                    "ident": "CTR01", "lat": 0.0, "lon": 0.0,
+                    "name": "", "icao_code": "ZS", "region_code": "ZS",
+                    "ref_table": "PC",
+                }
+            },
+            {},
         )
 
         row = self.dst.execute(
             """
             SELECT route_distance_holding_distance_time, arc_radius,
-                   distance_time
+                   distance_time, center_waypoint, center_waypoint_icao_code,
+                   center_waypoint_ref_table
             FROM tbl_pf_iaps
             WHERE airport_identifier='ZBAA' AND path_termination='RF'
             """
@@ -262,6 +279,9 @@ class ProcedureConversionTests(unittest.TestCase):
         self.assertEqual(row["route_distance_holding_distance_time"], "D")
         self.assertAlmostEqual(row["arc_radius"], 60.04, places=2)
         self.assertAlmostEqual(row["distance_time"], 94.3, places=1)
+        self.assertEqual(row["center_waypoint"], "CTR01")
+        self.assertEqual(row["center_waypoint_icao_code"], "ZS")
+        self.assertEqual(row["center_waypoint_ref_table"], "PC")
         self.assertEqual(
             self.dst.execute(
                 "SELECT COUNT(*) FROM tbl_pf_iaps "

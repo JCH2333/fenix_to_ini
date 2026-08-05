@@ -28,7 +28,9 @@ class WaypointConversionTests(unittest.TestCase):
                 ID INTEGER, ICAO TEXT, Latitude REAL, Longtitude REAL
             );
             CREATE TABLE Terminals (ID INTEGER, AirportID INTEGER);
-            CREATE TABLE TerminalLegs (TerminalID INTEGER, WptID INTEGER);
+            CREATE TABLE TerminalLegs (
+                TerminalID INTEGER, WptID INTEGER, CenterID INTEGER
+            );
             CREATE TABLE Waypoints (
                 ID INTEGER, Ident TEXT, Collocated INTEGER, Name TEXT,
                 Latitude REAL, Longtitude REAL, NavaidID INTEGER
@@ -54,13 +56,17 @@ class WaypointConversionTests(unittest.TestCase):
             (1, "ZUNZ", 29.3, 94.3),
         )
         self.src.execute("INSERT INTO Terminals VALUES (?, ?)", (10, 1))
-        self.src.execute("INSERT INTO TerminalLegs VALUES (?, ?)", (10, 2))
+        self.src.executemany(
+            "INSERT INTO TerminalLegs VALUES (?, ?, ?)",
+            [(10, 2, None), (10, 2, 4)],
+        )
         self.src.executemany(
             "INSERT INTO Waypoints VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
                 (1, "CNFIX", 0, "China enroute", 40.0, 116.0, None),
                 (2, "TERM1", 0, "ZUNZ terminal", 29.4, 94.4, None),
                 (3, "DUGIN", 0, "Afghanistan", 35.616, 71.516, None),
+                (4, "CTR01", 0, "RF center", 29.45, 94.45, None),
             ],
         )
 
@@ -81,9 +87,24 @@ class WaypointConversionTests(unittest.TestCase):
         ).fetchall()
 
         self.assertEqual([row[0] for row in enroute], ["CNFIX"])
-        self.assertEqual([row[0] for row in terminal], ["TERM1"])
-        self.assertEqual(set(waypoint_lookup), {1, 2})
-        self.assertEqual(terminal_ids, {2})
+        self.assertEqual([row[0] for row in terminal], ["CTR01", "TERM1"])
+        self.assertEqual(set(waypoint_lookup), {1, 2, 4})
+        self.assertEqual(terminal_ids, {2, 4})
+        self.assertEqual(
+            waypoint_lookup[1],
+            {
+                "ident": "CNFIX",
+                "lat": 40.0,
+                "lon": 116.0,
+                "name": "China enroute",
+                "navaid_id": None,
+                "icao_code": "ZB",
+                "region_code": "ZB",
+                "ref_table": "EA",
+            },
+        )
+        self.assertEqual(waypoint_lookup[2]["ref_table"], "PC")
+        self.assertEqual(waypoint_lookup[4]["ref_table"], "PC")
 
 
 if __name__ == "__main__":
