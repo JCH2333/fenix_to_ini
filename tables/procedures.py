@@ -220,8 +220,15 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         for (route_type, transition), section_legs in sections.items():
             section_legs.sort(key=lambda leg: leg['ID'])
             section_legs = _deduplicate_section_legs(section_legs)
+            map_index = _map_leg_index(section_legs)
+            rnp_ar_faf_index = (
+                _rnp_ar_faf_leg_index(section_legs, map_index)
+                if is_rnp_ar else None
+            )
             vertical_overrides = (
-                _rnp_ar_vertical_overrides(section_legs) if is_rnp_ar else {}
+                _rnp_ar_vertical_overrides(
+                    section_legs, rnp_ar_faf_index, map_index
+                ) if is_rnp_ar else {}
             )
             first_path_term = map_path_terminator(
                 (section_legs[0]['TrackCode'] or '').strip() or 'IF'
@@ -240,9 +247,15 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                     leg, icao, proc_ident, transition, rwy, route_type,
                     seqno, waypoint_lookup, navaid_lookup,
                     legs_ex.get(leg['ID']), previous_waypoint_coords,
-                    ils_lookup.get(terminal['IlsID']) if route_type == 'I' else None,
+                    (
+                        ils_lookup.get(terminal['IlsID'])
+                        if route_type == 'I'
+                        and (map_index is None or i <= map_index)
+                        else None
+                    ),
                     is_rnp_ar,
                     i == len(section_legs) - 1,
+                    i == rnp_ar_faf_index,
                     vertical_overrides.get(leg['ID']),
                 )
                 current_waypoint_coords = (
@@ -388,6 +401,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
                           procedure_ils: dict | None = None,
                           is_rnp_ar: bool = False,
                           is_last_in_section: bool = False,
+                          is_rnp_ar_faf: bool = False,
                           vertical_angle_override: float | None = None,
                           ) -> tuple:
     """Build a single procedure row from a TerminalLeg."""
@@ -517,7 +531,8 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
             pass
     if is_rnp_ar:
         waypoint_description = _normalize_rnp_ar_description(
-            raw_waypoint_description, wpt_ref_table, is_last_in_section
+            raw_waypoint_description, wpt_ref_table, is_last_in_section,
+            is_rnp_ar_faf,
         )
 
     center_icao_code = (center_icao_code or icao_code) if center_ident else None
@@ -570,29 +585,45 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     return row
 
 
-def _rnp_ar_vertical_overrides(section_legs) -> dict[int, float]:
-    """Carry the source MAP angle back over the final descent after the FAF."""
-    map_index = None
-    angle = None
+def _map_leg_index(section_legs) -> int | None:
     for index, leg in enumerate(section_legs):
-        if (leg['Alt'] or '').strip().upper() == 'MAP' and leg['Vnav']:
-            map_index = index
-            angle = leg['Vnav']
-            break
-    if map_index is None or not angle:
-        return {}
-    faf_indexes = [
+        if (leg['Alt'] or '').strip().upper() == 'MAP':
+            return index
+    return None
+
+
+def _rnp_ar_faf_leg_index(section_legs, map_index) -> int | None:
+    if map_index is None:
+        return None
+    candidates = [
         index for index, leg in enumerate(section_legs[:map_index])
         if 'F' in (leg['WptDescCode'] or '').upper()
     ]
-    start_index = faf_indexes[-1] + 1 if faf_indexes else map_index
+    constrained = [
+        index for index in candidates
+        if (section_legs[index]['Alt'] or '').strip()
+    ]
+    if constrained:
+        return constrained[-1]
+    return candidates[0] if candidates else None
+
+
+def _rnp_ar_vertical_overrides(section_legs, faf_index,
+                               map_index) -> dict[int, float]:
+    """Carry the source MAP angle back over the final descent after the FAF."""
+    if map_index is None:
+        return {}
+    angle = section_legs[map_index]['Vnav']
+    if not angle:
+        return {}
+    start_index = faf_index + 1 if faf_index is not None else map_index
     return {
         section_legs[index]['ID']: angle
         for index in range(start_index, map_index + 1)
     }
 
 
-def _normalize_rnp_ar_description(raw_value, ref_table, is_last):
+def _normalize_rnp_ar_description(raw_value, ref_table, is_last, is_faf):
     """Map compact Fenix NAIP codes to four-character DFDv2 codes."""
     if not raw_value or not str(raw_value).strip():
         return None
@@ -602,7 +633,7 @@ def _normalize_rnp_ar_description(raw_value, ref_table, is_last):
     if value == 'EI':
         return 'E  I'
     if value == 'EF':
-        return 'E  F'
+        return 'E  F' if is_faf else 'E   '
     if value == 'E':
         return 'E   '
     if value == 'V' and ref_table == 'PC':

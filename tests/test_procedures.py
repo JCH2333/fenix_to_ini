@@ -211,12 +211,17 @@ class ProcedureConversionTests(unittest.TestCase):
                 (3, 20, "I", "", "CF", None, 32.0588, 120.9806, None,
                  None, None, None, None, None, None, None, "MAP", 3.0,
                  None, None, None, "G  M"),
+                (4, 20, "I", "", "DF", 203, 32.1544, 120.8793, None,
+                 None, None, None, None, None, None, None, "02960A", None,
+                 None, None, None, "EE H"),
             ],
         )
         waypoints = {
             201: {"ident": "NT303", "lat": 31.8779, "lon": 120.9866,
                   "name": "", "icao_code": "ZS", "ref_table": "PC"},
             202: {"ident": "FI36", "lat": 31.9597, "lon": 120.9839,
+                  "name": "", "icao_code": "ZS", "ref_table": "PC"},
+            203: {"ident": "NT307", "lat": 32.1544, "lon": 120.8793,
                   "name": "", "icao_code": "ZS", "ref_table": "PC"},
         }
 
@@ -234,14 +239,17 @@ class ProcedureConversionTests(unittest.TestCase):
             ORDER BY seqno
             """
         ).fetchall()
-        self.assertEqual([row["seqno"] for row in rows], [10, 20, 30])
+        self.assertEqual([row["seqno"] for row in rows], [10, 20, 30, 40])
         self.assertEqual([row["waypoint_identifier"] for row in rows],
-                         ["NT303", "FI36", "RW36"])
-        self.assertTrue(all(row["recommended_navaid"] == "INT" for row in rows))
-        self.assertTrue(all(row["recommended_navaid_ref_table"] == "PI" for row in rows))
-        self.assertTrue(all(row["recommended_navaid_icao_code"] == "ZS" for row in rows))
+                         ["NT303", "FI36", "RW36", "NT307"])
+        self.assertTrue(all(row["recommended_navaid"] == "INT" for row in rows[:3]))
+        self.assertTrue(all(row["recommended_navaid_ref_table"] == "PI" for row in rows[:3]))
+        self.assertTrue(all(row["recommended_navaid_icao_code"] == "ZS" for row in rows[:3]))
+        self.assertIsNone(rows[3]["recommended_navaid"])
+        self.assertIsNone(rows[3]["recommended_navaid_ref_table"])
+        self.assertIsNone(rows[3]["recommended_navaid_icao_code"])
         self.assertEqual([row["vertical_angle"] for row in rows],
-                         [None, -3.0, -3.0])
+                         [None, -3.0, -3.0, None])
 
     def test_rnp_ar_semantics_cover_final_and_missed_approach(self):
         self.src.execute(
@@ -259,7 +267,7 @@ class ProcedureConversionTests(unittest.TestCase):
                  None, None, None, "EF"),
                 (3, 70, "0", None, "RF", 303, 29.25, 94.25, "L",
                  None, None, None, None, None, None, None, None, None,
-                 401, 29.22, 94.22, "V"),
+                 401, 29.22, 94.22, "EF"),
                 (4, 70, "0", None, "TF", None, 29.29586, 94.32253, None,
                  None, None, None, None, None, None, None, "MAP", 3.0,
                  None, None, None, "GY M"),
