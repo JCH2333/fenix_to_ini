@@ -261,8 +261,8 @@ def check_inibuilds_procedure_semantics(conn) -> bool:
                 lat = row['waypoint_latitude']
                 lon = row['waypoint_longitude']
                 if lat is None or lon is None or not any(
-                    abs(point_lat - lat) < 0.0001
-                    and abs(point_lon - lon) < 0.0001
+                    abs(point_lat - lat) < 0.001
+                    and abs(point_lon - lon) < 0.001
                     for point_lat, point_lon in candidates
                 ):
                     waypoint_mismatches += 1

@@ -10,6 +10,11 @@ def create_table(conn, name, columns):
     conn.execute(f'CREATE TABLE "{name}" ({definitions})')
 
 
+class AlwaysRnpArMetadata:
+    def is_rnp_ar(self, airport, runway, procedure_identifier, has_ils=False):
+        return True
+
+
 class ProcedureConversionTests(unittest.TestCase):
     def setUp(self):
         self.src = sqlite3.connect(":memory:")
@@ -330,6 +335,46 @@ class ProcedureConversionTests(unittest.TestCase):
         self.assertIsNotNone(runway_point)
         self.assertEqual(tuple(runway_point),
                          ("ZU", "ZUNZ", "RW05", 29.29586, 94.32253, "W Z"))
+
+    def test_uses_target_fir_code_instead_of_airport_prefix(self):
+        self._insert(
+            "tbl_pc_terminal_waypoints",
+            TBL_PC_COLUMNS,
+            {
+                "area_code": "EEU", "continent": "ASIA", "country": "CHINA",
+                "datum_code": "WGE", "icao_code": "ZW",
+                "magnetic_variation": 0.1, "region_code": "ZUAL",
+                "waypoint_identifier": "AK500", "waypoint_latitude": 31.99,
+                "waypoint_longitude": 80.12, "waypoint_name": "AK500",
+                "waypoint_type": "W Z",
+            },
+        )
+        self.src.execute(
+            "INSERT INTO Terminals VALUES (?,?,?,?,?,?,?,?,?)",
+            (80, 1, "3", "ZUAL", "R15", "R15", "15", 1, 0),
+        )
+        self.src.execute(
+            "INSERT INTO TerminalLegs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (1, 80, "0", None, "TF", None, 32.1177, 80.0423, None,
+             None, None, None, None, None, None, None, "MAP", 3.0,
+             None, None, None, "GY M"),
+        )
+
+        convert_procedures(
+            self.src, self.dst, {1: "ZUAL"}, {}, {}, {},
+            AlwaysRnpArMetadata(),
+        )
+
+        procedure_code = self.dst.execute(
+            "SELECT waypoint_icao_code FROM tbl_pf_iaps "
+            "WHERE airport_identifier='ZUAL'"
+        ).fetchone()[0]
+        runway_code = self.dst.execute(
+            "SELECT icao_code FROM tbl_pc_terminal_waypoints "
+            "WHERE region_code='ZUAL' AND waypoint_identifier='RW15'"
+        ).fetchone()[0]
+        self.assertEqual(procedure_code, "ZW")
+        self.assertEqual(runway_code, "ZW")
 
     def test_normalizes_fixed_fields_and_dependent_icao_codes(self):
         self.src.execute(

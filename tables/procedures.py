@@ -162,6 +162,19 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                 'ref_table': 'PI',
             }
 
+    airport_region_counts = defaultdict(lambda: defaultdict(int))
+    for row in dst_conn.execute("""
+        SELECT region_code, icao_code, COUNT(*) AS row_count
+        FROM tbl_pc_terminal_waypoints
+        WHERE length(region_code) = 4 AND icao_code IS NOT NULL
+        GROUP BY region_code, icao_code
+    """):
+        airport_region_counts[row['region_code']][row['icao_code']] += row['row_count']
+    airport_region_codes = {
+        airport: max(counts, key=counts.get)
+        for airport, counts in airport_region_counts.items()
+    }
+
     # Filter legs for Chinese terminals
     cn_legs = [leg for leg in all_legs if leg['TerminalID'] in cn_terminal_ids]
     print(f"  Fenix Chinese terminal legs: {len(cn_legs)}")
@@ -193,6 +206,7 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         covered_airports[table_name].add(icao)
         proc_ident = (terminal['Name'] or '').strip()[:6]
         rwy = normalize_runway(terminal['Rwy'] or '')
+        procedure_icao_code = airport_region_codes.get(icao, icao[:2])
         has_rf = any(
             map_path_terminator((leg['TrackCode'] or '').strip()) == 'RF'
             for leg in legs
@@ -248,7 +262,8 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                 seqno = (i + 1) * 10
 
                 row = _build_procedure_row(
-                    leg, icao, proc_ident, transition, rwy, route_type,
+                    leg, icao, procedure_icao_code, proc_ident, transition,
+                    rwy, route_type,
                     seqno, waypoint_lookup, navaid_lookup,
                     legs_ex.get(leg['ID']), previous_waypoint_coords,
                     (
@@ -277,6 +292,7 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                 ):
                     rnp_ar_runway_points.append({
                         'airport_identifier': icao,
+                        'icao_code': procedure_icao_code,
                         'waypoint_identifier': row[
                             TBL_PD_COLUMNS.index('waypoint_identifier')
                         ],
@@ -411,7 +427,8 @@ def _delete_airport_procedures(dst_conn: sqlite3.Connection,
     return removed
 
 
-def _build_procedure_row(leg, icao: str, proc_ident: str,
+def _build_procedure_row(leg, icao: str, procedure_icao_code: str,
+                         proc_ident: str,
                          transition: str | None, runway: str, route_type: str,
                          seqno: int,
                          waypoint_lookup: dict, navaid_lookup: dict,
@@ -508,7 +525,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
 
     # Area/ICAO codes
     area_code = 'EEU'
-    icao_code = icao[:2] if icao else 'ZB'
+    icao_code = procedure_icao_code or (icao[:2] if icao else 'ZB')
 
     # Turn direction
     turn_dir = (leg['TurnDir'] or '').strip() or None
@@ -635,17 +652,13 @@ def _merge_rnp_ar_runway_points(dst_conn, points):
         ).fetchone()
         if existing:
             values = {column: existing[column] for column in TBL_PC_COLUMNS}
-            values.update(
-                waypoint_latitude=latitude,
-                waypoint_longitude=longitude,
-            )
         else:
             values = {
                 'area_code': 'EEU',
                 'continent': 'ASIA',
                 'country': 'CHINA',
                 'datum_code': 'WGE',
-                'icao_code': airport[:2],
+                'icao_code': point['icao_code'],
                 'magnetic_variation': None,
                 'region_code': airport,
                 'waypoint_identifier': ident,
