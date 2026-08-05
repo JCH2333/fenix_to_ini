@@ -7,14 +7,23 @@ Uses tkinter (stdlib) for file selection, progress display, and result reporting
 
 import sys
 import os
+import json
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from auto_detect import detect_all
 from main import run_conversion, set_log_callback
+from update_manager import (
+    UpdateError,
+    check_for_update,
+    download_update,
+    launch_update_installer,
+)
+from version import __version__
 
 
 class RedirectText:
@@ -43,21 +52,22 @@ class RedirectText:
 class ConversionGUI:
     """Main GUI application window."""
 
-    def __init__(self):
+    def __init__(self, update_result: dict | None = None):
         self.root = tk.Tk()
-        self.root.title("Fenix -> DFDv2 导航数据转换工具 v1.5.0")
+        self.root.title(f"Fenix -> DFDv2 导航数据转换工具 v{__version__}")
         self.root.geometry("800x650")
         self.root.minsize(700, 550)
 
         self.conversion_thread: threading.Thread | None = None
         self.running = False
+        self.update_busy = False
         self.redirect: RedirectText | None = None
         self.detected_targets: dict[str, str] = {}
 
         self._build_ui()
 
-        # Auto-detect on startup
-        self.root.after(500, self.auto_detect)
+        # Keep startup dialogs sequential: update result, path detection, then update check.
+        self.root.after(300, lambda: self._run_startup_tasks(update_result))
 
     def _build_ui(self):
         """Build the GUI layout."""
@@ -164,7 +174,11 @@ class ConversionGUI:
         self.stop_btn = ttk.Button(btn_frame, text="停止", command=self.stop_conversion, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(btn_frame, text="验证数据库", command=self.verify_database).pack(side=tk.LEFT, padx=5)
+        self.verify_btn = ttk.Button(btn_frame, text="验证数据库", command=self.verify_database)
+        self.verify_btn.pack(side=tk.LEFT, padx=5)
+
+        self.update_btn = ttk.Button(btn_frame, text="检查更新", command=self.check_updates)
+        self.update_btn.pack(side=tk.LEFT, padx=5)
 
         ttk.Button(btn_frame, text="退出", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
 
@@ -173,6 +187,12 @@ class ConversionGUI:
         status_bar = ttk.Label(self.root, textvariable=self.status_var,
                                relief=tk.SUNKEN, anchor=tk.W, padding=5)
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+    def _run_startup_tasks(self, update_result: dict | None):
+        if update_result:
+            self._show_update_result(update_result)
+        self.auto_detect()
+        self.root.after(800, lambda: self.check_updates(manual=False))
 
     # ---- File Browsers ----
     def browse_src(self):
@@ -436,6 +456,141 @@ class ConversionGUI:
         self.status_var.set("正在停止...")
         self._set_running(False)
 
+    # ---- Updates ----
+    def check_updates(self, manual: bool = True):
+        """Check for a release without blocking the GUI."""
+        if self.running or self.update_busy:
+            if manual and self.running:
+                messagebox.showinfo("检查更新", "请等待当前转换或验证完成后再检查更新。")
+            return
+
+        self.update_busy = True
+        self.update_btn.config(state=tk.DISABLED)
+        if manual:
+            self.status_var.set("正在检查更新...")
+            self.progress_label.config(text="正在检查更新...")
+
+        def worker():
+            result = check_for_update()
+            self.root.after(0, lambda: self._on_update_checked(result, manual))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_checked(self, result, manual: bool):
+        self.update_busy = False
+        self.update_btn.config(state=tk.NORMAL if not self.running else tk.DISABLED)
+
+        if result.error:
+            self.log(f"更新检查失败: {result.error}")
+            if manual:
+                self.status_var.set("检查更新失败")
+                self.progress_label.config(text="检查更新失败")
+                messagebox.showerror(
+                    "检查更新",
+                    "GitHub 和国内镜像均不可用，请稍后重试。",
+                )
+            return
+
+        if not result.update_available:
+            if manual:
+                self.status_var.set(f"当前已是最新版 v{__version__}")
+                self.progress_label.config(text="当前已是最新版")
+                messagebox.showinfo("检查更新", f"当前已是最新版 v{__version__}。")
+            return
+
+        release = result.release
+        if not release:
+            return
+        if self.running:
+            self.log(f"发现新版本 v{release.version}，请在当前操作完成后点击检查更新。")
+            return
+
+        confirmed = messagebox.askyesno(
+            "发现新版本",
+            f"发现新版本 v{release.version}（当前 v{__version__}）。\n\n"
+            "是否立即下载安装？\n\n"
+            "程序会自动备份当前版本，安装完成后自动重启；安装失败会自动恢复。",
+        )
+        if confirmed:
+            self._download_and_install_update(release)
+
+    def _download_and_install_update(self, release):
+        self.update_busy = True
+        self._set_update_controls(False)
+        self.progress_var.set(0)
+        self.progress_label.config(text=f"正在下载 v{release.version}...")
+        self.status_var.set("正在下载并校验更新包...")
+
+        def progress(received: int, total: int):
+            percent = min(100.0, received * 100.0 / max(total, 1))
+            self.root.after(0, lambda: self.progress_var.set(percent))
+            self.root.after(
+                0,
+                lambda: self.progress_label.config(
+                    text=f"下载更新 {received / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB"
+                ),
+            )
+
+        def worker():
+            try:
+                package_path = download_update(release, progress_callback=progress)
+                self.root.after(
+                    0,
+                    lambda: self._start_update_installer(package_path, release),
+                )
+            except (UpdateError, OSError) as exc:
+                error = str(exc)
+                self.root.after(0, lambda: self._on_update_download_failed(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_update_installer(self, package_path: Path, release):
+        try:
+            self.progress_var.set(100)
+            self.progress_label.config(text="下载校验完成，正在安装...")
+            self.status_var.set("程序即将关闭，更新完成后会自动重启...")
+            launch_update_installer(
+                package_path,
+                Path(__file__).resolve().parent,
+                release,
+                os.getpid(),
+            )
+        except (OSError, UpdateError) as exc:
+            package_path.unlink(missing_ok=True)
+            self._on_update_download_failed(str(exc))
+            return
+        self.root.after(100, self.root.destroy)
+
+    def _on_update_download_failed(self, error: str):
+        self.update_busy = False
+        self._set_update_controls(True)
+        self.progress_label.config(text="自动更新失败")
+        self.status_var.set("自动更新失败")
+        self.log(f"自动更新失败: {error}")
+        messagebox.showerror(
+            "自动更新失败",
+            f"更新包下载或校验失败，当前程序未被修改。\n\n{error}",
+        )
+
+    def _set_update_controls(self, enabled: bool):
+        state = tk.NORMAL if enabled and not self.running else tk.DISABLED
+        self.start_btn.config(state=state)
+        self.detect_btn.config(state=state)
+        self.verify_btn.config(state=state)
+        self.update_btn.config(state=state)
+
+    def _show_update_result(self, result: dict):
+        success = bool(result.get("success"))
+        message = str(result.get("message") or "更新结果未知")
+        if success:
+            self.status_var.set(f"已成功更新到 v{result.get('version', __version__)}")
+            self.progress_label.config(text="自动更新完成")
+            messagebox.showinfo("自动更新完成", message)
+        else:
+            self.status_var.set("自动更新失败，已保留原版本")
+            self.progress_label.config(text="自动更新失败")
+            messagebox.showerror("自动更新失败", message)
+
     # ---- Verification ----
     def verify_database(self):
         """Run verification on the selected database."""
@@ -488,6 +643,8 @@ class ConversionGUI:
         self.start_btn.config(state=state_start)
         self.stop_btn.config(state=state_stop)
         self.detect_btn.config(state=state_start)
+        self.verify_btn.config(state=state_start)
+        self.update_btn.config(state=state_start)
 
     def _on_progress(self, phase: int, total: int, label: str):
         """Called from conversion pipeline for progress updates."""
@@ -525,6 +682,23 @@ class ConversionGUI:
         self.root.mainloop()
 
 
+def _read_update_result(argv: list[str]) -> dict | None:
+    """Read and remove the temporary result passed by the updater."""
+    if "--update-result" not in argv:
+        return None
+    index = argv.index("--update-result")
+    if index + 1 >= len(argv):
+        return {"success": False, "message": "更新结果文件参数无效"}
+    path = Path(argv[index + 1])
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+        return result if isinstance(result, dict) else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"success": False, "message": f"无法读取更新结果: {exc}"}
+    finally:
+        path.unlink(missing_ok=True)
+
+
 if __name__ == '__main__':
-    app = ConversionGUI()
+    app = ConversionGUI(_read_update_result(sys.argv[1:]))
     app.run()
