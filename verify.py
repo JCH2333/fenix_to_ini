@@ -41,6 +41,7 @@ def verify_all(db_path: str, source_path: str | None = None) -> bool:
     all_ok &= check_frequency_ranges(conn)
     all_ok &= check_coordinate_ranges(conn)
     all_ok &= check_referential_integrity(conn)
+    all_ok &= check_inibuilds_procedure_semantics(conn)
     if is_toliss_target(conn):
         all_ok &= check_toliss_loader_compatibility(conn)
     if source_path:
@@ -157,6 +158,129 @@ def check_toliss_loader_compatibility(conn) -> bool:
         ok = False
     else:
         print("  [OK] 程序固定字段或 NULL 联动无效: 0")
+    return ok
+
+
+def check_inibuilds_procedure_semantics(conn) -> bool:
+    """Validate procedure contracts observed in working iniBuilds data."""
+    print("\n--- iniBuilds 程序语义检查 ---")
+    ok = True
+    china_filter = (
+        "(airport_identifier LIKE 'Z%' "
+        "OR airport_identifier IN ('VHHX','OPGT'))"
+    )
+
+    positive_angles = conn.execute(
+        "SELECT COUNT(*) FROM tbl_pf_iaps "
+        f"WHERE {china_filter} AND vertical_angle > 0"
+    ).fetchone()[0]
+    if positive_angles:
+        print(f"  [FAIL] 正数进近垂直角: {positive_angles}")
+        ok = False
+    else:
+        print("  [OK] 进近垂直角方向")
+
+    partial_ar = conn.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT airport_identifier, procedure_identifier
+            FROM tbl_pf_iaps
+            WHERE airport_identifier LIKE 'Z%'
+               OR airport_identifier IN ('VHHX','OPGT')
+            GROUP BY airport_identifier, procedure_identifier
+            HAVING SUM(CASE WHEN authorization_required = 'Y' THEN 1 ELSE 0 END) > 0
+               AND SUM(CASE WHEN authorization_required IS NOT 'Y' THEN 1 ELSE 0 END) > 0
+        )
+        """
+    ).fetchone()[0]
+    if partial_ar:
+        print(f"  [FAIL] 授权标记不完整的 RNP AR 程序: {partial_ar}")
+        ok = False
+    else:
+        print("  [OK] RNP AR 授权标记一致")
+
+    invalid_rf = 0
+    for table in ("tbl_pd_sids", "tbl_pe_stars", "tbl_pf_iaps"):
+        invalid_rf += conn.execute(
+            f"""
+            SELECT COUNT(*) FROM {table}
+            WHERE {china_filter}
+              AND path_termination = 'RF'
+              AND (arc_radius IS NULL OR arc_radius <= 0
+                   OR center_waypoint_latitude IS NULL
+                   OR center_waypoint_longitude IS NULL)
+            """
+        ).fetchone()[0]
+    if invalid_rf:
+        print(f"  [FAIL] RF 航段几何不完整: {invalid_rf}")
+        ok = False
+    else:
+        print("  [OK] RF 航段几何完整")
+
+    point_coordinates = {}
+    for ref_table, table in (
+        ("PC", "tbl_pc_terminal_waypoints"),
+        ("EA", "tbl_ea_enroute_waypoints"),
+    ):
+        for row in conn.execute(
+            f"SELECT waypoint_identifier, icao_code, waypoint_latitude, "
+            f"waypoint_longitude FROM {table}"
+        ):
+            key = (ref_table, row[0], row[1])
+            point_coordinates.setdefault(key, []).append((row[2], row[3]))
+
+    waypoint_mismatches = 0
+    localizer_keys = {
+        (row[0], row[1])
+        for row in conn.execute(
+            "SELECT airport_identifier, llz_identifier "
+            "FROM tbl_pi_localizers_glideslopes"
+        )
+    }
+    pi_mismatches = 0
+    for table in ("tbl_pd_sids", "tbl_pe_stars", "tbl_pf_iaps"):
+        rows = conn.execute(
+            f"""
+            SELECT airport_identifier, waypoint_ref_table,
+                   waypoint_identifier, waypoint_icao_code,
+                   waypoint_latitude, waypoint_longitude,
+                   recommended_navaid, recommended_navaid_ref_table
+            FROM {table}
+            WHERE {china_filter}
+            """
+        )
+        for row in rows:
+            ref_table = row['waypoint_ref_table']
+            if ref_table in {'PC', 'EA'} and row['waypoint_identifier']:
+                key = (
+                    ref_table,
+                    row['waypoint_identifier'],
+                    row['waypoint_icao_code'],
+                )
+                candidates = point_coordinates.get(key, ())
+                lat = row['waypoint_latitude']
+                lon = row['waypoint_longitude']
+                if lat is None or lon is None or not any(
+                    abs(point_lat - lat) < 0.0001
+                    and abs(point_lon - lon) < 0.0001
+                    for point_lat, point_lon in candidates
+                ):
+                    waypoint_mismatches += 1
+            if row['recommended_navaid_ref_table'] == 'PI':
+                if (row['airport_identifier'], row['recommended_navaid']) \
+                        not in localizer_keys:
+                    pi_mismatches += 1
+
+    if waypoint_mismatches:
+        print(f"  [FAIL] EA/PC 航点引用或坐标不一致: {waypoint_mismatches}")
+        ok = False
+    else:
+        print("  [OK] EA/PC 航点引用与坐标一致")
+    if pi_mismatches:
+        print(f"  [FAIL] 无匹配航向台的 PI 引用: {pi_mismatches}")
+        ok = False
+    else:
+        print("  [OK] PI 航向台引用完整")
     return ok
 
 
