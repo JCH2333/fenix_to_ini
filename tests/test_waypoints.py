@@ -87,7 +87,7 @@ class WaypointConversionTests(unittest.TestCase):
             self.src,
             self.dst,
             {2: "ZLXX", 1: "ZUNZ"},
-            FakeRegionLookup({"CNFIX": "ZB"}),
+            FakeRegionLookup({"CNFIX": "ZB", "TERM1": "ZY"}),
         )
 
         enroute = self.dst.execute(
@@ -99,7 +99,7 @@ class WaypointConversionTests(unittest.TestCase):
             "ORDER BY waypoint_identifier"
         ).fetchall()
 
-        self.assertEqual([row[0] for row in enroute], ["CNFIX"])
+        self.assertEqual([row[0] for row in enroute], ["CNFIX", "TERM1"])
         self.assertEqual([row[0] for row in terminal], ["CTR01", "TERM1"])
         self.assertEqual(set(waypoint_lookup), {1, 2, 4})
         self.assertEqual(terminal_ids, {2, 4})
@@ -116,7 +116,7 @@ class WaypointConversionTests(unittest.TestCase):
                 "ref_table": "EA",
             },
         )
-        self.assertEqual(waypoint_lookup[2]["ref_table"], "PC")
+        self.assertEqual(waypoint_lookup[2]["ref_table"], "EA")
         self.assertEqual(waypoint_lookup[4]["ref_table"], "PC")
         self.assertEqual(waypoint_lookup[2]["icao_code"], "ZU")
         self.assertEqual(waypoint_lookup[4]["icao_code"], "ZU")

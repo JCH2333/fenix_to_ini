@@ -231,6 +231,9 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
         area_code, icao_code, region_code = derive_area_icao(
             lat, lon, ident, region_lookup, nearest_apt
         )
+        if owner_airports and nearest_apt:
+            icao_code = nearest_apt[:2]
+            region_code = icao_code
         existing_ea_row = _find_existing_waypoint(
             existing_ea_rows.get(ident, ()), lat, lon
         )

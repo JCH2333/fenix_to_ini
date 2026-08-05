@@ -177,6 +177,7 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
     iap_rows = []
     stats = {'sid': 0, 'star': 0, 'iap': 0}
     covered_airports = defaultdict(set)
+    rnp_ar_runway_points = []
 
     for terminal in cn_terminals:
         proc = str(terminal['Proc'])
@@ -268,6 +269,20 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                 )
                 if _valid_coordinates(current_waypoint_coords):
                     previous_waypoint_coords = current_waypoint_coords
+                if (
+                    uses_rnp_ar_runway_fix
+                    and (leg['Alt'] or '').strip().upper() == 'MAP'
+                    and row[TBL_PD_COLUMNS.index('waypoint_identifier')]
+                    and _valid_coordinates(current_waypoint_coords)
+                ):
+                    rnp_ar_runway_points.append({
+                        'airport_identifier': icao,
+                        'waypoint_identifier': row[
+                            TBL_PD_COLUMNS.index('waypoint_identifier')
+                        ],
+                        'latitude': current_waypoint_coords[0],
+                        'longitude': current_waypoint_coords[1],
+                    })
 
                 if table_name == 'tbl_pd_sids':
                     sid_rows.append(row)
@@ -288,6 +303,7 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
             if _valid_coordinates(previous_waypoint_coords):
                 section_endpoints.append(previous_waypoint_coords)
 
+    _merge_rnp_ar_runway_points(dst_conn, rnp_ar_runway_points)
     replaced = _delete_airport_procedures(dst_conn, covered_airports)
 
     # Insert into target tables
@@ -588,6 +604,67 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     )
 
     return row
+
+
+def _merge_rnp_ar_runway_points(dst_conn, points):
+    """Ensure PC runway fixes referenced by RNP AR procedures exist."""
+    if not points:
+        return
+    from db_utils import batch_merge_by_coordinates
+    from tables.waypoints import TBL_PC_COLUMNS
+
+    rows = []
+    seen = set()
+    for point in points:
+        airport = point['airport_identifier']
+        ident = point['waypoint_identifier']
+        latitude = point['latitude']
+        longitude = point['longitude']
+        key = (airport, ident, round(latitude, 6), round(longitude, 6))
+        if key in seen:
+            continue
+        seen.add(key)
+        existing = dst_conn.execute(
+            """
+            SELECT * FROM tbl_pc_terminal_waypoints
+            WHERE region_code=? AND waypoint_identifier=?
+            ORDER BY ABS(waypoint_latitude-?) + ABS(waypoint_longitude-?)
+            LIMIT 1
+            """,
+            (airport, ident, latitude, longitude),
+        ).fetchone()
+        if existing:
+            values = {column: existing[column] for column in TBL_PC_COLUMNS}
+            values.update(
+                waypoint_latitude=latitude,
+                waypoint_longitude=longitude,
+            )
+        else:
+            values = {
+                'area_code': 'EEU',
+                'continent': 'ASIA',
+                'country': 'CHINA',
+                'datum_code': 'WGE',
+                'icao_code': airport[:2],
+                'magnetic_variation': None,
+                'region_code': airport,
+                'waypoint_identifier': ident,
+                'waypoint_latitude': latitude,
+                'waypoint_longitude': longitude,
+                'waypoint_name': ident,
+                'waypoint_type': 'W Z',
+            }
+        rows.append(tuple(values[column] for column in TBL_PC_COLUMNS))
+    batch_merge_by_coordinates(
+        dst_conn,
+        'tbl_pc_terminal_waypoints',
+        TBL_PC_COLUMNS,
+        rows,
+        'waypoint_identifier',
+        'waypoint_latitude',
+        'waypoint_longitude',
+        match_columns=['region_code'],
+    )
 
 
 def _map_leg_index(section_legs) -> int | None:

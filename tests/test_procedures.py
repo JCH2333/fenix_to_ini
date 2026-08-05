@@ -2,6 +2,7 @@ import sqlite3
 import unittest
 
 from tables.procedures import TBL_PD_COLUMNS, TBL_PF_COLUMNS, convert_procedures
+from tables.waypoints import TBL_PC_COLUMNS
 
 
 def create_table(conn, name, columns):
@@ -44,6 +45,7 @@ class ProcedureConversionTests(unittest.TestCase):
         )
         create_table(self.dst, "tbl_pd_sids", TBL_PD_COLUMNS)
         create_table(self.dst, "tbl_pe_stars", TBL_PD_COLUMNS)
+        create_table(self.dst, "tbl_pc_terminal_waypoints", TBL_PC_COLUMNS)
         # MSFS 2024 iniBuilds A340 omits the optional ctl column.
         create_table(
             self.dst,
@@ -317,6 +319,17 @@ class ProcedureConversionTests(unittest.TestCase):
                          ["E  I", "E  F", "E   ", "EY M", "E   ", "EE H"])
         self.assertEqual(rows[3]["waypoint_identifier"], "RW05")
         self.assertEqual(rows[3]["waypoint_ref_table"], "PC")
+        runway_point = self.dst.execute(
+            """
+            SELECT icao_code, region_code, waypoint_identifier,
+                   waypoint_latitude, waypoint_longitude, waypoint_type
+            FROM tbl_pc_terminal_waypoints
+            WHERE region_code='ZUNZ' AND waypoint_identifier='RW05'
+            """
+        ).fetchone()
+        self.assertIsNotNone(runway_point)
+        self.assertEqual(tuple(runway_point),
+                         ("ZU", "ZUNZ", "RW05", 29.29586, 94.32253, "W Z"))
 
     def test_normalizes_fixed_fields_and_dependent_icao_codes(self):
         self.src.execute(
