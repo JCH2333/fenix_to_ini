@@ -51,9 +51,12 @@ class WaypointConversionTests(unittest.TestCase):
         self.dst.close()
 
     def test_uses_naip_membership_instead_of_broad_bounding_box(self):
-        self.src.execute(
+        self.src.executemany(
             "INSERT INTO Airports VALUES (?, ?, ?, ?)",
-            (1, "ZUNZ", 29.3, 94.3),
+            [
+                (2, "ZLXX", 29.2, 94.2),
+                (1, "ZUNZ", 29.3, 94.3),
+            ],
         )
         self.src.execute("INSERT INTO Terminals VALUES (?, ?)", (10, 1))
         self.src.executemany(
@@ -73,7 +76,7 @@ class WaypointConversionTests(unittest.TestCase):
         waypoint_lookup, terminal_ids = convert_waypoints(
             self.src,
             self.dst,
-            {1: "ZUNZ"},
+            {2: "ZLXX", 1: "ZUNZ"},
             FakeRegionLookup({"CNFIX": "ZB"}),
         )
 
@@ -105,6 +108,8 @@ class WaypointConversionTests(unittest.TestCase):
         )
         self.assertEqual(waypoint_lookup[2]["ref_table"], "PC")
         self.assertEqual(waypoint_lookup[4]["ref_table"], "PC")
+        self.assertEqual(waypoint_lookup[2]["icao_code"], "ZU")
+        self.assertEqual(waypoint_lookup[4]["icao_code"], "ZU")
 
 
 if __name__ == "__main__":

@@ -128,16 +128,26 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
 
     # Get endpoint and RF-center waypoint IDs referenced by Chinese terminals.
     terminal_wpt_ids = set()
+    terminal_waypoint_airports = {}
     if cn_terminal_ids:
         placeholders = ','.join('?' for _ in cn_terminal_ids)
         for row in src_conn.execute(f"""
-            SELECT WptID AS WaypointID FROM TerminalLegs
-            WHERE TerminalID IN ({placeholders}) AND WptID IS NOT NULL AND WptID > 0
+            SELECT l.WptID AS WaypointID, t.AirportID
+            FROM TerminalLegs l JOIN Terminals t ON t.ID = l.TerminalID
+            WHERE l.TerminalID IN ({placeholders})
+              AND l.WptID IS NOT NULL AND l.WptID > 0
             UNION
-            SELECT CenterID AS WaypointID FROM TerminalLegs
-            WHERE TerminalID IN ({placeholders}) AND CenterID IS NOT NULL AND CenterID > 0
+            SELECT l.CenterID AS WaypointID, t.AirportID
+            FROM TerminalLegs l JOIN Terminals t ON t.ID = l.TerminalID
+            WHERE l.TerminalID IN ({placeholders})
+              AND l.CenterID IS NOT NULL AND l.CenterID > 0
         """, list(cn_terminal_ids) * 2):
             terminal_wpt_ids.add(row['WaypointID'])
+            owner = airport_lookup.get(row['AirportID'])
+            if owner:
+                terminal_waypoint_airports.setdefault(
+                    row['WaypointID'], set()
+                ).add(owner)
 
     print(f"  Chinese terminal waypoints (from TerminalLegs): {len(terminal_wpt_ids)}")
 
@@ -201,11 +211,19 @@ def convert_waypoints(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection
             continue
 
         # Find nearest Chinese airport for fallback region assignment
-        nearest_apt = None
-        for apt_icao, (apt_lat, apt_lon) in cn_airport_coords.items():
-            if abs(lat - apt_lat) < 5 and abs(lon - apt_lon) < 5:
-                nearest_apt = apt_icao
-                break
+        owner_airports = terminal_waypoint_airports.get(wpt_id, set())
+        candidates = owner_airports or {
+            apt_icao for apt_icao, (apt_lat, apt_lon) in cn_airport_coords.items()
+            if abs(lat - apt_lat) < 5 and abs(lon - apt_lon) < 5
+        }
+        nearest_apt = min(
+            candidates,
+            key=lambda apt_icao: (
+                (lat - cn_airport_coords[apt_icao][0]) ** 2
+                + (lon - cn_airport_coords[apt_icao][1]) ** 2
+            ),
+            default=None,
+        )
 
         area_code, icao_code, region_code = derive_area_icao(lat, lon, ident, region_lookup, nearest_apt)
         waypoint_lookup[wpt_id] = {
