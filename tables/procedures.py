@@ -97,7 +97,8 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                        airport_lookup: dict[int, str],
                        runway_lookup: dict[int, dict],
                        waypoint_lookup: dict[int, dict],
-                       navaid_lookup: dict[int, dict]):
+                       navaid_lookup: dict[int, dict],
+                       procedure_metadata=None):
     """
     Convert terminal procedures for Chinese airports.
 
@@ -191,6 +192,22 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         covered_airports[table_name].add(icao)
         proc_ident = (terminal['Name'] or '').strip()[:6]
         rwy = normalize_runway(terminal['Rwy'] or '')
+        has_rf = any(
+            map_path_terminator((leg['TrackCode'] or '').strip()) == 'RF'
+            for leg in legs
+        )
+        is_rnp_ar = bool(
+            proc == '3'
+            and (
+                (has_rf and proc_ident.upper().startswith('R'))
+                or (
+                    procedure_metadata is not None
+                    and procedure_metadata.is_rnp_ar(
+                        icao, rwy, proc_ident, has_ils=bool(terminal['IlsID'])
+                    )
+                )
+            )
+        )
 
         # Each (route type, transition) pair is an independent DFD section.
         sections = defaultdict(list)
@@ -203,6 +220,9 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
         for (route_type, transition), section_legs in sections.items():
             section_legs.sort(key=lambda leg: leg['ID'])
             section_legs = _deduplicate_section_legs(section_legs)
+            vertical_overrides = (
+                _rnp_ar_vertical_overrides(section_legs) if is_rnp_ar else {}
+            )
             first_path_term = map_path_terminator(
                 (section_legs[0]['TrackCode'] or '').strip() or 'IF'
             )
@@ -221,6 +241,9 @@ def convert_procedures(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connectio
                     seqno, waypoint_lookup, navaid_lookup,
                     legs_ex.get(leg['ID']), previous_waypoint_coords,
                     ils_lookup.get(terminal['IlsID']) if route_type == 'I' else None,
+                    is_rnp_ar,
+                    i == len(section_legs) - 1,
+                    vertical_overrides.get(leg['ID']),
                 )
                 current_waypoint_coords = (
                     row[WAYPOINT_LATITUDE_INDEX],
@@ -363,6 +386,9 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
                           previous_waypoint_coords: tuple[float | None,
                                                           float | None] | None,
                           procedure_ils: dict | None = None,
+                          is_rnp_ar: bool = False,
+                          is_last_in_section: bool = False,
+                          vertical_angle_override: float | None = None,
                           ) -> tuple:
     """Build a single procedure row from a TerminalLeg."""
 
@@ -459,7 +485,8 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     dist_time = leg['Distance'] if leg['Distance'] and leg['Distance'] != 0 else None
 
     # VNAV
-    vnav = -abs(leg['Vnav']) if leg['Vnav'] and leg['Vnav'] != 0 else None
+    raw_vnav = vertical_angle_override or leg['Vnav']
+    vnav = -abs(raw_vnav) if raw_vnav and raw_vnav != 0 else None
 
     # Arc geometry. ToLiss does not read the center-waypoint columns for RF
     # legs, so radius and travelled arc distance must be populated explicitly.
@@ -488,6 +515,10 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
                 rnp = rnp_val
         except (ValueError, TypeError):
             pass
+    if is_rnp_ar:
+        waypoint_description = _normalize_rnp_ar_description(
+            raw_waypoint_description, wpt_ref_table, is_last_in_section
+        )
 
     center_icao_code = (center_icao_code or icao_code) if center_ident else None
     recommended_navaid_icao_code = icao_code if nav_ident else None
@@ -500,7 +531,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
         alt2,                           # altitude2
         arc_radius,                     # arc_radius
         area_code,                      # area_code
-        None,                           # authorization_required
+        'Y' if is_rnp_ar else None,     # authorization_required
         center_icao_code,               # center_waypoint_icao_code
         center_lat,                     # center_waypoint_latitude
         center_lon,                     # center_waypoint_longitude
@@ -517,7 +548,7 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
         nav_ref,                        # recommended_navaid_ref_table
         nav_ident,                      # recommended_navaid
         None,                           # rho
-        rnp,                            # rnp
+        0.3 if is_rnp_ar else rnp,      # rnp
         route_distance_type,            # route_distance_holding_distance_time
         route_type,                     # route_type
         seqno,                          # seqno
@@ -537,6 +568,48 @@ def _build_procedure_row(leg, icao: str, proc_ident: str,
     )
 
     return row
+
+
+def _rnp_ar_vertical_overrides(section_legs) -> dict[int, float]:
+    """Carry the source MAP angle back over the final descent after the FAF."""
+    map_index = None
+    angle = None
+    for index, leg in enumerate(section_legs):
+        if (leg['Alt'] or '').strip().upper() == 'MAP' and leg['Vnav']:
+            map_index = index
+            angle = leg['Vnav']
+            break
+    if map_index is None or not angle:
+        return {}
+    faf_indexes = [
+        index for index, leg in enumerate(section_legs[:map_index])
+        if 'F' in (leg['WptDescCode'] or '').upper()
+    ]
+    start_index = faf_indexes[-1] + 1 if faf_indexes else map_index
+    return {
+        section_legs[index]['ID']: angle
+        for index in range(start_index, map_index + 1)
+    }
+
+
+def _normalize_rnp_ar_description(raw_value, ref_table, is_last):
+    """Map compact Fenix NAIP codes to four-character DFDv2 codes."""
+    if not raw_value or not str(raw_value).strip():
+        return None
+    value = str(raw_value).strip().upper()
+    if is_last and value == 'EE':
+        return 'EE H'
+    if value == 'EI':
+        return 'E  I'
+    if value == 'EF':
+        return 'E  F'
+    if value == 'E':
+        return 'E   '
+    if value == 'V' and ref_table == 'PC':
+        return 'E   '
+    if value == 'E A':
+        return 'E CA' if ref_table == 'EA' else 'E  A'
+    return str(raw_value)[:4].ljust(4)
 
 
 def _derive_rf_geometry(previous_waypoint, waypoint, center, turn_direction):

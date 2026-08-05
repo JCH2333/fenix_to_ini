@@ -48,6 +48,8 @@ class RegionLookup:
         if csv_dir is None:
             csv_dir = self._auto_detect_csv_dir()
 
+        self.csv_dir = csv_dir
+
         if csv_dir and os.path.isdir(csv_dir):
             self._load_from_csv(csv_dir)
 

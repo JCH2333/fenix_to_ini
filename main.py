@@ -44,6 +44,7 @@ from tables.empty_tables import create_empty_tables
 from tables.toliss import is_toliss_target, sanitize_toliss_data
 from rte_seg import parse_rte_seg, resolve_coordinates, merge_rte_seg_to_airways
 from region_lookup import RegionLookup
+from naip_metadata import NaipProcedureMetadata
 from deployment import find_package_layout, update_package_layout
 
 
@@ -265,6 +266,7 @@ def run_conversion(
 
         # 初始化 2607 NAIP CSV 区域码交叉参考（用于修正 icao_code 区域分配）
         region_lookup = RegionLookup()
+        procedure_metadata = NaipProcedureMetadata(region_lookup.csv_dir)
 
         # === Phase 1 ===
         advance("Phase 1: Airports")
@@ -315,7 +317,7 @@ def run_conversion(
                 convert_procedures(
                     src_conn, dst_conn,
                     airport_lookup, runway_lookup,
-                    waypoint_lookup, navaid_lookup
+                    waypoint_lookup, navaid_lookup, procedure_metadata
                 )
             else:
                 log("Phase 7: Terminal Procedures - SKIPPED")

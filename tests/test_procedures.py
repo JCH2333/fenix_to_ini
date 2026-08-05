@@ -243,6 +243,67 @@ class ProcedureConversionTests(unittest.TestCase):
         self.assertEqual([row["vertical_angle"] for row in rows],
                          [None, -3.0, -3.0])
 
+    def test_rnp_ar_semantics_cover_final_and_missed_approach(self):
+        self.src.execute(
+            "INSERT INTO Terminals VALUES (?,?,?,?,?,?,?,?,?)",
+            (70, 1, "3", "ZUNZ", "R05", "R05", "05", 42781, 0),
+        )
+        self.src.executemany(
+            "INSERT INTO TerminalLegs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (1, 70, "0", None, "IF", 301, 29.19, 94.10, None,
+                 None, None, None, None, None, None, None, "13500A", None,
+                 None, None, None, "EI"),
+                (2, 70, "0", None, "TF", 302, 29.20, 94.20, None,
+                 None, None, None, None, None, None, None, "13000A", None,
+                 None, None, None, "EF"),
+                (3, 70, "0", None, "RF", 303, 29.25, 94.25, "L",
+                 None, None, None, None, None, None, None, None, None,
+                 401, 29.22, 94.22, "V"),
+                (4, 70, "0", None, "TF", None, 29.29586, 94.32253, None,
+                 None, None, None, None, None, None, None, "MAP", 3.0,
+                 None, None, None, "GY M"),
+                (5, 70, "0", None, "TF", 304, 29.40, 94.40, None,
+                 None, None, None, None, None, None, None, None, None,
+                 None, None, None, "EE"),
+            ],
+        )
+        waypoints = {
+            identifier: {
+                "ident": ident, "lat": lat, "lon": lon, "name": "",
+                "icao_code": "ZU", "ref_table": "PC",
+            }
+            for identifier, ident, lat, lon in [
+                (301, "LZ250", 29.19, 94.10),
+                (302, "LZ186", 29.20, 94.20),
+                (303, "LZ184", 29.25, 94.25),
+                (304, "LZ302", 29.40, 94.40),
+                (401, "LZC20", 29.22, 94.22),
+            ]
+        }
+
+        convert_procedures(
+            self.src, self.dst, {1: "ZUNZ"}, {}, waypoints, {}
+        )
+
+        rows = self.dst.execute(
+            """
+            SELECT seqno, waypoint_identifier, authorization_required, rnp,
+                   vertical_angle, waypoint_description_code
+            FROM tbl_pf_iaps
+            WHERE airport_identifier='ZUNZ' AND procedure_identifier='R05'
+            ORDER BY seqno
+            """
+        ).fetchall()
+        self.assertEqual(len(rows), 5)
+        self.assertTrue(all(row["authorization_required"] == "Y" for row in rows))
+        self.assertTrue(all(row["rnp"] == 0.3 for row in rows))
+        self.assertEqual([row["vertical_angle"] for row in rows],
+                         [None, None, -3.0, -3.0, None])
+        self.assertEqual([row["waypoint_description_code"] for row in rows],
+                         ["E  I", "E  F", "E   ", "GY M", "EE H"])
+        self.assertEqual(rows[3]["waypoint_identifier"], "RW05")
+
     def test_normalizes_fixed_fields_and_dependent_icao_codes(self):
         self.src.execute(
             "INSERT INTO Terminals VALUES (?,?,?,?,?,?,?,?,?)",
