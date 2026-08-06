@@ -28,7 +28,7 @@ class DeploymentProfile:
 DEPLOYMENT_PROFILES = {
     "ini_a340": DeploymentProfile("ini_a340", "iniBuilds A340", True),
     "ini_a350": DeploymentProfile("ini_a350", "iniBuilds A350", True),
-    "as346": DeploymentProfile("as346", "Aerosoft AS346", False, True),
+    "as346": DeploymentProfile("as346", "Aerosoft AS346", True, True),
     "c919": DeploymentProfile("c919", "C919", True),
 }
 

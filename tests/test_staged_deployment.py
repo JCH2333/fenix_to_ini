@@ -82,6 +82,9 @@ class DeploymentTests(unittest.TestCase):
     def test_as346_sanitizes_private_copy_only(self):
         target = self.root / "ng_jeppesen_fwdfd_2607.s3db"
         create_database(target, "official")
+        target.with_name("cycle.json").write_text(
+            json.dumps({"name": "ToLiss", "format": "dfdv2"}), encoding="utf-8"
+        )
         with patch("deployment.sanitize_toliss_data", return_value={}) as sanitize:
             result = deploy_staged_database(
                 self.staged, "as346", [str(target)],
@@ -89,6 +92,9 @@ class DeploymentTests(unittest.TestCase):
             )
         self.assertTrue(sanitize.called)
         self.assertEqual("staged", read_value(target))
+        cycle = json.loads(target.with_name("cycle.json").read_text(encoding="utf-8"))
+        self.assertEqual("2607", cycle["cycle"])
+        self.assertEqual("ToLiss", cycle["name"])
         self.assertTrue(result.sha256)
 
     def test_failure_restores_database_cycle_and_layout(self):
