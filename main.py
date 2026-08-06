@@ -41,7 +41,7 @@ from tables.rest import (
     convert_grid_mora, convert_airport_comm
 )
 from tables.empty_tables import create_empty_tables
-from tables.toliss import is_toliss_target, sanitize_toliss_data
+from tables.toliss import sanitize_toliss_data
 from rte_seg import parse_rte_seg, resolve_coordinates, merge_rte_seg_to_airways
 from region_lookup import RegionLookup
 from naip_metadata import NaipProcedureMetadata
@@ -145,6 +145,7 @@ def run_conversion(
     skip_rte: bool = False,
     no_backup: bool = False,
     overwrite_mode: bool = True,
+    target_profile: str = "generic",
     progress_callback: ProgressCallback | None = None,
     dry_run: bool = False,
 ) -> str | None:
@@ -159,7 +160,8 @@ def run_conversion(
         skip_procedures: Skip Phase 7 (terminal procedures) for speed.
         skip_rte: Skip RTE_SEG.csv processing.
         no_backup: Skip backup creation.
-        overwrite_mode: If True, copy dst -> work on copy -> write back to dst.
+        overwrite_mode: Retained for CLI compatibility.
+        target_profile: ``generic`` for standard DFDv2 targets, or ``as346``.
         progress_callback: Called with (phase, total, label) for progress tracking.
         dry_run: Analyze only, don't write changes.
 
@@ -334,7 +336,9 @@ def run_conversion(
         advance("Phase 9: Empty Tables & Schema")
         create_empty_tables(dst_conn, working_path)
 
-        if is_toliss_target(dst_conn):
+        if target_profile not in {"generic", "as346"}:
+            raise ValueError(f"未知目标适配器: {target_profile}")
+        if target_profile == "as346":
             log()
             log("=== ToLiss / AS346 Compatibility ===")
             toliss_stats = sanitize_toliss_data(dst_conn)
@@ -492,6 +496,7 @@ Examples:
             skip_rte=args.skip_rte,
             no_backup=args.no_backup,
             overwrite_mode=args.overwrite,
+            target_profile="as346" if args.aircraft == "as346" else "generic",
             dry_run=args.dry_run,
         )
         if result:

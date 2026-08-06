@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from auto_detect import detect_as346_s3db, detect_inibuilds_s3db
+from auto_detect import detect_as346_s3db, detect_c919_s3db, detect_inibuilds_s3db
 
 
 class IniBuildsDetectionTests(unittest.TestCase):
@@ -145,6 +145,32 @@ class IniBuildsDetectionTests(unittest.TestCase):
 
         self.assertEqual(Path(next(iter(results.values()))), database)
         self.assertIn("Store/Xbox", next(iter(results)))
+
+    def test_detects_c919_bundled_database(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            appdata = root / "AppData"
+            packages = root / "Packages"
+            database = (
+                packages / "Community" / "fycyc-aircraft-c919" / "Navigraph" /
+                "BundledData" / "ng_jeppesen_fwdfd_2607.s3db"
+            )
+            database.parent.mkdir(parents=True)
+            database.touch()
+            config_dir = appdata / "Microsoft Flight Simulator 2024"
+            config_dir.mkdir(parents=True)
+            (config_dir / "UserCfg.opt").write_text(
+                f'InstalledPackagesPath "{packages}"', encoding="utf-8"
+            )
+
+            with patch.dict(os.environ, {
+                "APPDATA": str(appdata),
+                "LOCALAPPDATA": str(root / "LocalAppData"),
+            }):
+                results = detect_c919_s3db()
+
+        self.assertEqual(Path(next(iter(results.values()))), database)
+        self.assertIn("C919", next(iter(results)))
 
 
 if __name__ == "__main__":

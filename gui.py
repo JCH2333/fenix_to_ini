@@ -16,7 +16,9 @@ from tkinter import ttk, filedialog, messagebox
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from auto_detect import detect_all
-from main import run_conversion, set_log_callback
+from deployment import DEPLOYMENT_PROFILES, deploy_staged_database
+from main import set_log_callback
+from staging import create_staged_navigation_data, staging_database_path
 from update_manager import (
     UpdateError,
     check_for_update,
@@ -55,14 +57,16 @@ class ConversionGUI:
     def __init__(self, update_result: dict | None = None):
         self.root = tk.Tk()
         self.root.title(f"Fenix -> DFDv2 导航数据转换工具 v{__version__}")
-        self.root.geometry("800x650")
-        self.root.minsize(700, 550)
+        self.root.geometry("900x700")
+        self.root.minsize(780, 600)
 
         self.conversion_thread: threading.Thread | None = None
+        self.deployment_thread: threading.Thread | None = None
         self.running = False
         self.update_busy = False
         self.redirect: RedirectText | None = None
-        self.detected_targets: dict[str, str] = {}
+        self.detected_targets: dict[str, list[str]] = {}
+        self.staged_database: Path | None = None
 
         self._build_ui()
 
@@ -94,39 +98,26 @@ class ConversionGUI:
         self.detect_label = ttk.Label(btn_frame, text="", foreground="gray")
         self.detect_label.pack(side=tk.LEFT, padx=10)
 
-        # Row 1: Aircraft target
-        ttk.Label(paths_frame, text="目标机模:", width=18, anchor=tk.E).grid(row=1, column=0, sticky=tk.W, pady=2)
-        self.aircraft_var = tk.StringVar(value="iniBuilds A340")
-        self.aircraft_combo = ttk.Combobox(
-            paths_frame,
-            textvariable=self.aircraft_var,
-            values=("iniBuilds A340", "Aerosoft AS346"),
-            state="readonly",
-            width=67,
-        )
-        self.aircraft_combo.grid(row=1, column=1, sticky=tk.EW, padx=5, pady=2)
-        self.aircraft_combo.bind("<<ComboboxSelected>>", self._on_aircraft_changed)
-
-        # Row 2: Fenix nd.db3
-        ttk.Label(paths_frame, text="Fenix nd.db3:", width=18, anchor=tk.E).grid(row=2, column=0, sticky=tk.W, pady=2)
+        # Row 1: Fenix nd.db3
+        ttk.Label(paths_frame, text="Fenix nd.db3:", width=18, anchor=tk.E).grid(row=1, column=0, sticky=tk.W, pady=2)
         self.src_var = tk.StringVar()
         self.src_entry = ttk.Entry(paths_frame, textvariable=self.src_var, width=70)
-        self.src_entry.grid(row=2, column=1, sticky=tk.EW, padx=5, pady=2)
-        ttk.Button(paths_frame, text="浏览...", command=self.browse_src).grid(row=2, column=2, pady=2)
+        self.src_entry.grid(row=1, column=1, sticky=tk.EW, padx=5, pady=2)
+        ttk.Button(paths_frame, text="浏览...", command=self.browse_src).grid(row=1, column=2, pady=2)
 
-        # Row 3: target DFDv2 database
-        ttk.Label(paths_frame, text="目标 DFDv2 数据库:", width=18, anchor=tk.E).grid(row=3, column=0, sticky=tk.W, pady=2)
-        self.dst_var = tk.StringVar()
-        self.dst_entry = ttk.Entry(paths_frame, textvariable=self.dst_var, width=70)
-        self.dst_entry.grid(row=3, column=1, sticky=tk.EW, padx=5, pady=2)
-        ttk.Button(paths_frame, text="浏览...", command=self.browse_dst).grid(row=3, column=2, pady=2)
+        # Row 2: generic DFDv2 template used only to build the local staging copy
+        ttk.Label(paths_frame, text="暂存转换模板:", width=18, anchor=tk.E).grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.template_var = tk.StringVar()
+        self.template_entry = ttk.Entry(paths_frame, textvariable=self.template_var, width=70)
+        self.template_entry.grid(row=2, column=1, sticky=tk.EW, padx=5, pady=2)
+        ttk.Button(paths_frame, text="浏览...", command=self.browse_template).grid(row=2, column=2, pady=2)
 
-        # Row 4: RTE_SEG.csv
-        ttk.Label(paths_frame, text="RTE_SEG.csv (可选):", width=18, anchor=tk.E).grid(row=4, column=0, sticky=tk.W, pady=2)
+        # Row 3: RTE_SEG.csv
+        ttk.Label(paths_frame, text="RTE_SEG.csv (可选):", width=18, anchor=tk.E).grid(row=3, column=0, sticky=tk.W, pady=2)
         self.csv_var = tk.StringVar()
         self.csv_entry = ttk.Entry(paths_frame, textvariable=self.csv_var, width=70)
-        self.csv_entry.grid(row=4, column=1, sticky=tk.EW, padx=5, pady=2)
-        ttk.Button(paths_frame, text="浏览...", command=self.browse_csv).grid(row=4, column=2, pady=2)
+        self.csv_entry.grid(row=3, column=1, sticky=tk.EW, padx=5, pady=2)
+        ttk.Button(paths_frame, text="浏览...", command=self.browse_csv).grid(row=3, column=2, pady=2)
 
         paths_frame.columnconfigure(1, weight=1)
 
@@ -140,8 +131,26 @@ class ConversionGUI:
         self.rte_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt_frame, text="处理 RTE_SEG.csv", variable=self.rte_var).pack(side=tk.LEFT, padx=10)
 
-        self.backup_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_frame, text="自动备份原文件", variable=self.backup_var).pack(side=tk.LEFT, padx=10)
+        ttk.Label(opt_frame, text="部署时自动备份导航库、周期文件和布局文件", foreground="gray").pack(side=tk.LEFT, padx=10)
+
+        deploy_frame = ttk.LabelFrame(self.root, text=" 部署目标（生成本地暂存后可多选） ", padding=10)
+        deploy_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.target_vars: dict[str, tk.BooleanVar] = {}
+        self.target_checks: dict[str, ttk.Checkbutton] = {}
+        self.target_labels: dict[str, ttk.Label] = {}
+        for column, (key, profile) in enumerate(DEPLOYMENT_PROFILES.items()):
+            variable = tk.BooleanVar(value=False)
+            self.target_vars[key] = variable
+            check = ttk.Checkbutton(
+                deploy_frame, text=profile.label, variable=variable,
+                command=self._refresh_deploy_button,
+                state=tk.DISABLED,
+            )
+            check.grid(row=0, column=column * 2, sticky=tk.W, padx=(8, 2))
+            self.target_checks[key] = check
+            label = ttk.Label(deploy_frame, text="未检测到", foreground="gray", width=13)
+            label.grid(row=0, column=column * 2 + 1, sticky=tk.W, padx=(0, 8))
+            self.target_labels[key] = label
 
         # Progress bar
         progress_frame = ttk.Frame(self.root, padding=(10, 5))
@@ -168,8 +177,11 @@ class ConversionGUI:
         btn_frame = ttk.Frame(self.root, padding=10)
         btn_frame.pack(fill=tk.X)
 
-        self.start_btn = ttk.Button(btn_frame, text="开始转换", command=self.start_conversion)
+        self.start_btn = ttk.Button(btn_frame, text="生成本地暂存", command=self.start_conversion)
         self.start_btn.pack(side=tk.LEFT, padx=5)
+
+        self.deploy_btn = ttk.Button(btn_frame, text="部署到所选机模", command=self.deploy_selected, state=tk.DISABLED)
+        self.deploy_btn.pack(side=tk.LEFT, padx=5)
 
         self.stop_btn = ttk.Button(btn_frame, text="停止", command=self.stop_conversion, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
@@ -183,7 +195,7 @@ class ConversionGUI:
         ttk.Button(btn_frame, text="退出", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
 
         # Status bar
-        self.status_var = tk.StringVar(value='就绪 - 点击 [自动检测路径] 或手动输入文件路径')
+        self.status_var = tk.StringVar(value='就绪 - 先生成本地暂存，再部署到所选机模')
         status_bar = ttk.Label(self.root, textvariable=self.status_var,
                                relief=tk.SUNKEN, anchor=tk.W, padding=5)
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
@@ -203,13 +215,13 @@ class ConversionGUI:
         if path:
             self.src_var.set(path)
 
-    def browse_dst(self):
+    def browse_template(self):
         path = filedialog.askopenfilename(
-            title="选择目标 DFDv2 数据库",
+            title="选择标准 DFDv2 转换模板",
             filetypes=[("SQLite Database", "*.s3db"), ("All Files", "*.*")]
         )
         if path:
-            self.dst_var.set(path)
+            self.template_var.set(path)
 
     def browse_csv(self):
         path = filedialog.askopenfilename(
@@ -220,11 +232,6 @@ class ConversionGUI:
             self.csv_var.set(path)
 
     # ---- Auto Detection ----
-    def _on_aircraft_changed(self, _event=None):
-        path = self.detected_targets.get(self.aircraft_var.get())
-        if path:
-            self.dst_var.set(path)
-
     def auto_detect(self):
         """Auto-detect navigation data paths and prompt user."""
         self.log("检测导航数据路径...\n")
@@ -237,8 +244,7 @@ class ConversionGUI:
 
         fenix = results.get('fenix_db')
         csv_path = results.get('fenix_csv')
-        ini_results = results.get('ini_s3db', {})
-        as346_results = results.get('as346_s3db', {})
+        deployment_targets = results.get('deployment_targets', {})
         naip = results.get('naip_completeness')
 
         # Build detection summary
@@ -262,54 +268,31 @@ class ConversionGUI:
         else:
             lines.append(f"  [--] RTE_SEG.csv: 未找到")
 
-        if ini_results:
-            lines.append(f"  iniBuilds: 检测到 {len(ini_results)} 个位置")
-            for label, path in ini_results.items():
-                lines.append(f"    [{label}]")
-                lines.append(f"    {path}")
-        else:
-            lines.append(f"  [--] iniBuilds: 未找到")
+        self.detected_targets = {
+            key: list(paths) for key, paths in deployment_targets.items()
+        }
+        template_path = None
+        for key in ("ini_a340", "ini_a350", "c919", "as346"):
+            paths = self.detected_targets.get(key, [])
+            profile = DEPLOYMENT_PROFILES[key]
+            if paths:
+                self.target_checks[key].config(state=tk.NORMAL)
+                self.target_labels[key].config(
+                    text=f"已检测 {len(paths)} 处", foreground="green"
+                )
+                lines.append(f"  [OK] {profile.label}: {len(paths)} 个加载位置")
+                if template_path is None:
+                    template_path = paths[0]
+            else:
+                self.target_vars[key].set(False)
+                self.target_checks[key].config(state=tk.DISABLED)
+                self.target_labels[key].config(text="未检测到", foreground="gray")
+                lines.append(f"  [--] {profile.label}: 未检测到")
 
-        if as346_results:
-            lines.append(f"  Aerosoft AS346: 检测到 {len(as346_results)} 个位置")
-            for label, path in as346_results.items():
-                lines.append(f"    [{label}]")
-                lines.append(f"    {path}")
+        self._refresh_deploy_button()
 
         msg = '\n'.join(lines)
-
-        # Auto-select best match. Exclude "目录存在，无s3db" placeholder
-        # entries (directory found but no db.s3db written yet) — see main.py
-        # for the same fix rationale.
-        msfs24_keys = [k for k in ini_results if '2024' in k and '无s3db' not in k]
-        msfs20_keys = [k for k in ini_results if '2020' in k]
-        selected_ini = None
-        selected_label = None
-        if msfs24_keys:
-            selected_label = msfs24_keys[0]
-            selected_ini = ini_results[selected_label]
-        elif msfs20_keys:
-            selected_label = msfs20_keys[0]
-            selected_ini = ini_results[selected_label]
-
-        self.detected_targets = {}
-        for label, path in ini_results.items():
-            if 'a340' in label.lower() and 'BundledData' in label:
-                self.detected_targets.setdefault("iniBuilds A340", path)
-        for label, path in as346_results.items():
-            if 'fallback' not in label.lower():
-                self.detected_targets.setdefault("Aerosoft AS346", path)
-
-        available_targets = list(self.detected_targets)
-        if available_targets:
-            self.aircraft_combo.configure(values=available_targets)
-            if self.aircraft_var.get() not in self.detected_targets:
-                self.aircraft_var.set(available_targets[0])
-            selected_label = self.aircraft_var.get()
-            selected_ini = self.detected_targets[selected_label]
-
-        # Build summary for dialog
-        summary = f"Fenix: {fenix or '未找到'}\nCSV: {csv_path or '未找到'}\niniBuilds: {selected_label or '未找到'}"
+        summary = f"Fenix: {fenix or '未找到'}\nCSV: {csv_path or '未找到'}\n转换模板: {template_path or '未找到'}"
         if naip and not naip.get('error') and not naip['is_complete']:
             summary += (f"\n\n警告：检测到的 Fenix 数据仅 {naip['cn_airports_with_procs']} 个中国机场含进离场程序，"
                         f"可能不是含 NAIP 数据的完整版，转换后中国机场程序会很少。")
@@ -317,28 +300,22 @@ class ConversionGUI:
         self.log(msg + '\n')
 
         # Ask user
-        if fenix and selected_ini:
+        if fenix:
             answer = messagebox.askyesno(
                 "自动检测完成",
                 f"{summary}\n\n是否自动填入以上路径？"
             )
             if answer:
                 self.src_var.set(fenix)
-                self.dst_var.set(selected_ini)
+                if template_path:
+                    self.template_var.set(template_path)
                 if csv_path:
                     self.csv_var.set(csv_path)
-                self.detect_label.config(text=f"已填入: {selected_label}", foreground="green")
-                self.status_var.set("路径已自动填入，准备就绪")
+                self.detect_label.config(text="已填入转换来源和模板", foreground="green")
+                self.status_var.set("路径已自动填入，可生成本地暂存")
             else:
                 self.detect_label.config(text="检测完成，请手动输入", foreground="orange")
                 self.status_var.set("请手动输入或浏览文件路径")
-        elif fenix and not selected_ini:
-            self.src_var.set(fenix)
-            if csv_path:
-                self.csv_var.set(csv_path)
-            self.detect_label.config(text="已填入 Fenix 路径，请手动选择 iniBuilds 目标", foreground="orange")
-            self.status_var.set("请选择 iniBuilds db.s3db 路径")
-            messagebox.showinfo("部分检测", f"Fenix nd.db3 已自动填入。\n\niniBuilds s3db 未自动检测到，请手动选择。\n\n检测到的 iniBuilds 位置:\n{msg}")
         else:
             self.detect_label.config(text="未检测到路径", foreground="red")
             self.status_var.set("未检测到导航数据，请手动输入路径")
@@ -347,35 +324,32 @@ class ConversionGUI:
     def start_conversion(self):
         """Start the conversion in a background thread."""
         src = self.src_var.get().strip()
-        dst = self.dst_var.get().strip()
+        template = self.template_var.get().strip()
         csv_path = self.csv_var.get().strip() or None
 
         # Validate
         if not src:
             messagebox.showerror("错误", "请选择 Fenix nd.db3 文件路径")
             return
-        if not dst:
-            messagebox.showerror("错误", "请选择目标 DFDv2 数据库文件路径")
+        if not template:
+            messagebox.showerror("错误", "请选择用于生成暂存数据的标准 DFDv2 模板")
             return
         if not os.path.exists(src):
             messagebox.showerror("错误", f"Fenix nd.db3 不存在:\n{src}")
             return
-        if not os.path.exists(dst):
-            messagebox.showerror("错误", f"目标 DFDv2 数据库不存在:\n{dst}")
+        if not os.path.exists(template):
+            messagebox.showerror("错误", f"转换模板数据库不存在:\n{template}")
             return
 
         skip_proc = not self.procedures_var.get()
         skip_rte = not self.rte_var.get()
-        no_backup = not self.backup_var.get()
-
-        # Confirm overwrite
         if not messagebox.askyesno(
-            "确认转换",
-            f"源文件: {src}\n目标文件: {dst}\n\n"
-            f"{'将备份原文件' if not no_backup else '不备份原文件'}\n"
+            "确认生成暂存",
+            f"源文件: {src}\n转换模板: {template}\n\n"
+            "将生成本地暂存导航数据，不会覆盖任何机模文件。\n"
             f"{'转换进离场程序' if not skip_proc else '跳过进离场程序'}\n"
             f"{'处理RTE_SEG.csv' if not skip_rte else '跳过RTE_SEG.csv'}\n\n"
-            f"确认开始转换？"
+            "确认开始生成？"
         ):
             return
 
@@ -394,7 +368,7 @@ class ConversionGUI:
         # Run conversion in background thread
         self.conversion_thread = threading.Thread(
             target=self._run_conversion_thread,
-            args=(src, dst, csv_path, skip_proc, skip_rte, no_backup),
+            args=(src, template, csv_path, skip_proc, skip_rte),
             daemon=True
         )
         self.conversion_thread.start()
@@ -402,17 +376,15 @@ class ConversionGUI:
         # Poll for completion
         self.root.after(200, self._check_thread)
 
-    def _run_conversion_thread(self, src, dst, csv_path, skip_proc, skip_rte, no_backup):
+    def _run_conversion_thread(self, src, template, csv_path, skip_proc, skip_rte):
         """Background thread for conversion."""
         try:
-            result = run_conversion(
+            result = create_staged_navigation_data(
                 src_path=src,
-                dst_path=dst,
+                template_path=template,
                 csv_path=csv_path,
                 skip_procedures=skip_proc,
                 skip_rte=skip_rte,
-                no_backup=no_backup,
-                overwrite_mode=True,
                 progress_callback=self._on_progress,
             )
             self._conversion_result = ('ok', result)
@@ -441,10 +413,17 @@ class ConversionGUI:
 
         result = getattr(self, '_conversion_result', ('error', 'Unknown'))
         if result[0] == 'ok':
+            self.staged_database = Path(result[1]).resolve()
             self.progress_var.set(100)
             self.progress_label.config(text="转换完成!")
             self.status_var.set(f"转换成功! 输出: {result[1]}")
-            messagebox.showinfo("完成", f"导航数据转换完成!\n\n输出文件: {result[1]}")
+            self._refresh_deploy_button()
+            messagebox.showinfo(
+                "完成",
+                "导航数据已生成到本地暂存区。\n\n"
+                f"暂存文件: {self.staged_database}\n\n"
+                "请勾选需要覆盖的机模，再点击“部署到所选机模”。",
+            )
         else:
             self.progress_label.config(text="转换失败")
             self.status_var.set("转换失败，请查看日志")
@@ -455,6 +434,92 @@ class ConversionGUI:
         self.running = False
         self.status_var.set("正在停止...")
         self._set_running(False)
+
+    # ---- Deployment ----
+    def deploy_selected(self):
+        """Deploy the existing staging output to all selected aircraft."""
+        staged = self.staged_database or staging_database_path()
+        selected = [key for key, variable in self.target_vars.items() if variable.get()]
+        if not staged.is_file():
+            messagebox.showerror("错误", "请先生成本地暂存导航数据。")
+            return
+        if not selected:
+            messagebox.showerror("错误", "请至少选择一个已检测到的机模。")
+            return
+
+        details = []
+        for key in selected:
+            paths = self.detected_targets.get(key, [])
+            if not paths:
+                messagebox.showerror("错误", f"{DEPLOYMENT_PROFILES[key].label} 没有可用的导航数据路径。")
+                return
+            details.append(f"- {DEPLOYMENT_PROFILES[key].label}: {len(paths)} 个位置")
+
+        if not messagebox.askyesno(
+            "确认覆盖导航数据",
+            "将覆盖以下机模的导航数据：\n\n" + "\n".join(details)
+            + "\n\n请确认 Microsoft Flight Simulator 2024 已完全关闭。"
+              "\n部署前会自动备份数据库、周期文件和布局文件。"
+              "\nAS346 会额外应用已验证的兼容性适配。\n\n是否继续？",
+        ):
+            return
+
+        self._set_running(True)
+        self.progress_var.set(0)
+        self.progress_label.config(text="准备部署...")
+        self.status_var.set("正在部署导航数据...")
+        self._deployment_result = None
+        self.deployment_thread = threading.Thread(
+            target=self._run_deployment_thread, args=(staged, selected), daemon=True
+        )
+        self.deployment_thread.start()
+        self.root.after(200, self._check_deployment_thread)
+
+    def _run_deployment_thread(self, staged: Path, selected: list[str]):
+        try:
+            results = []
+            total = len(selected)
+            for index, key in enumerate(selected, start=1):
+                profile = DEPLOYMENT_PROFILES[key]
+                self.root.after(0, lambda index=index, total=total, profile=profile:
+                                self._set_deployment_progress(index - 1, total, f"正在部署到 {profile.label}..."))
+                results.append(deploy_staged_database(staged, key, self.detected_targets[key]))
+                self.root.after(0, lambda index=index, total=total, profile=profile:
+                                self._set_deployment_progress(index, total, f"{profile.label} 部署完成"))
+            self._deployment_result = ("ok", results)
+        except Exception as exc:
+            import traceback
+            self._deployment_result = ("error", str(exc) + "\n" + traceback.format_exc())
+
+    def _set_deployment_progress(self, current: int, total: int, label: str):
+        self.progress_var.set(current * 100 / max(total, 1))
+        self.progress_label.config(text=label)
+        self.status_var.set(label)
+
+    def _check_deployment_thread(self):
+        if self.deployment_thread and self.deployment_thread.is_alive():
+            self.root.after(200, self._check_deployment_thread)
+            return
+        self._on_deployment_done()
+
+    def _on_deployment_done(self):
+        self._set_running(False)
+        result = self._deployment_result or ("error", "部署线程未返回结果")
+        if result[0] == "ok":
+            self.progress_var.set(100)
+            self.progress_label.config(text="部署完成")
+            self.status_var.set("已完成所选机模的导航数据部署")
+            summary = [
+                f"{item.profile.label}: {len(item.database_paths)} 个位置\n备份: {item.backup_directory}"
+                for item in result[1]
+            ]
+            messagebox.showinfo("部署完成", "\n\n".join(summary))
+        else:
+            self.progress_label.config(text="部署失败，已尝试恢复备份")
+            self.status_var.set("部署失败，请查看日志和备份目录")
+            self.log(result[1])
+            messagebox.showerror("部署失败", result[1][:700])
+        self._refresh_deploy_button()
 
     # ---- Updates ----
     def check_updates(self, manual: bool = True):
@@ -578,6 +643,9 @@ class ConversionGUI:
         self.detect_btn.config(state=state)
         self.verify_btn.config(state=state)
         self.update_btn.config(state=state)
+        for key, check in self.target_checks.items():
+            check.config(state=state if self.detected_targets.get(key) else tk.DISABLED)
+        self._refresh_deploy_button()
 
     def _show_update_result(self, result: dict):
         success = bool(result.get("success"))
@@ -594,7 +662,8 @@ class ConversionGUI:
     # ---- Verification ----
     def verify_database(self):
         """Run verification on the selected database."""
-        path = self.dst_var.get().strip()
+        staged = self.staged_database or staging_database_path()
+        path = str(staged) if staged.is_file() else self.template_var.get().strip()
         if not path or not os.path.exists(path):
             messagebox.showerror("错误", "请先选择或自动检测目标 DFDv2 数据库")
             return
@@ -645,6 +714,20 @@ class ConversionGUI:
         self.detect_btn.config(state=state_start)
         self.verify_btn.config(state=state_start)
         self.update_btn.config(state=state_start)
+        for key, check in self.target_checks.items():
+            check.config(
+                state=tk.DISABLED if running or not self.detected_targets.get(key) else tk.NORMAL
+            )
+        self._refresh_deploy_button()
+
+    def _refresh_deploy_button(self):
+        staged = self.staged_database or staging_database_path()
+        has_target = any(
+            self.target_vars[key].get() and self.detected_targets.get(key)
+            for key in self.target_vars
+        )
+        state = tk.NORMAL if not self.running and staged.is_file() and has_target else tk.DISABLED
+        self.deploy_btn.config(state=state)
 
     def _on_progress(self, phase: int, total: int, label: str):
         """Called from conversion pipeline for progress updates."""

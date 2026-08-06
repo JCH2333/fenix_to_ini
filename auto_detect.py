@@ -297,6 +297,62 @@ def detect_as346_s3db() -> dict[str, str]:
     return results
 
 
+def detect_c919_s3db() -> dict[str, str]:
+    """Detect the C919's persistent DFDv2 BundledData database."""
+    results = {}
+    user_roots, package_roots = _msfs2024_locations()
+    for source_label, package_root in package_roots:
+        community_dirs = [package_root]
+        community_dirs.extend(
+            os.path.join(package_root, name)
+            for name in ("Community", "Community2024")
+        )
+        for community_dir in community_dirs:
+            pattern = os.path.join(
+                community_dir, "fycyc-aircraft-c919*", "Navigraph",
+                "BundledData", "*.s3db"
+            )
+            for path in sorted(glob.glob(pattern)):
+                _add_result(results, f"{source_label} - C919 (BundledData)", path)
+
+    for source_label, user_root in user_roots:
+        pattern = os.path.join(
+            user_root, "WASM", "MSFS2024", "fycyc-aircraft-c919*",
+            "work", "NavigationData", "*.s3db"
+        )
+        for path in sorted(glob.glob(pattern)):
+            _add_result(results, f"{source_label} - C919 (WASM)", path)
+    return results
+
+
+def _ordered_paths(results: dict[str, str], keyword: str) -> list[str]:
+    matches = [
+        (label, path) for label, path in results.items()
+        if keyword.casefold() in label.casefold() and "无s3db" not in label
+    ]
+    matches.sort(key=lambda item: ("bundleddata" not in item[0].casefold(), item[0]))
+    return list(dict.fromkeys(path for _, path in matches))
+
+
+def detect_deployment_targets() -> dict[str, list[str]]:
+    """Return every persistent/loading path for the supported deploy targets."""
+    ini_results = detect_inibuilds_s3db()
+    as346_results = detect_as346_s3db()
+    c919_results = detect_c919_s3db()
+    as346_paths = [
+        path for label, path in as346_results.items()
+        if "fallback" not in label.casefold()
+    ]
+    if not as346_paths:
+        as346_paths = list(as346_results.values())
+    return {
+        "ini_a340": _ordered_paths(ini_results, "inibuilds-aircraft-a340"),
+        "ini_a350": _ordered_paths(ini_results, "inibuilds-aircraft-a350"),
+        "as346": as346_paths[:1],
+        "c919": _ordered_paths(c919_results, "c919"),
+    }
+
+
 def check_naip_completeness(fenix_db_path: str) -> dict:
     """
     检查 Fenix nd.db3 是否包含完整的 NAIP 中国程序数据。
@@ -359,6 +415,8 @@ def detect_all() -> dict:
         'fenix_csv': detect_fenix_csv(),
         'ini_s3db': detect_inibuilds_s3db(),
         'as346_s3db': detect_as346_s3db(),
+        'c919_s3db': detect_c919_s3db(),
+        'deployment_targets': detect_deployment_targets(),
         'naip_completeness': naip_completeness,
     }
 
