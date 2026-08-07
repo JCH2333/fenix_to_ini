@@ -20,7 +20,7 @@
 --------
 
 当前 GUI 使用两步工作流：
-1. 选择 Fenix nd.db3 与任意一份官方 DFDv2 数据库作为转换模板，点击“生成本地暂存”。转换结果固定保存在 output/staged/fenix_naip_dfdv2.s3db，不会立即覆盖游戏文件。
+1. 选择 Fenix nd.db3 与任意一份官方 DFDv2 数据库作为转换模板，点击“生成本地暂存”。转换结果固定保存在 output/staged/db.s3db，使用 iniBuilds 标准文件名，不会立即覆盖游戏文件。
 2. 勾选已检测到的 iniBuilds A340、iniBuilds A350、Aerosoft AS346 或 C919，确认游戏已完全退出后，点击“部署到所选机模”。同一份暂存结果可反复部署到多个机模，无需重复转换。
 
 部署前工具会创建带时间戳的数据库、cycle.json 与 layout.json 备份。iniBuilds 和 C919 使用标准 DFDv2 暂存库；AS346 会仅在部署副本上执行运行时兼容性处理。请在实机验证通过前将结果视为测试版。

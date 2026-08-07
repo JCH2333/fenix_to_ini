@@ -35,7 +35,7 @@ class DeploymentTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.staged_dir = self.root / "staged"
         self.staged_dir.mkdir()
-        self.staged = self.staged_dir / "fenix_naip_dfdv2.s3db"
+        self.staged = self.staged_dir / "db.s3db"
         create_database(self.staged, "staged")
         (self.staged_dir / "cycle.json").write_text(
             json.dumps({"cycle": "2607", "revision": "2", "name": "暂存"}),
@@ -48,7 +48,7 @@ class DeploymentTests(unittest.TestCase):
     def test_staging_path_is_stable_and_ignored_output_location(self):
         with patch.object(staging, "STAGING_DIRECTORY", self.root / "output" / "staged"):
             self.assertEqual(
-                self.root / "output" / "staged" / "fenix_naip_dfdv2.s3db",
+                self.root / "output" / "staged" / "db.s3db",
                 staging.staging_database_path(),
             )
 

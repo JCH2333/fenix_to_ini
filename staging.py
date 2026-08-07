@@ -9,7 +9,8 @@ from main import run_conversion
 
 
 STAGING_DIRECTORY = Path(__file__).resolve().parent / "output" / "staged"
-STAGING_DATABASE_NAME = "fenix_naip_dfdv2.s3db"
+# iniBuilds expects this canonical DFDv2 database filename.
+STAGING_DATABASE_NAME = "db.s3db"
 
 
 def staging_database_path() -> Path:
